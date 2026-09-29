@@ -214,7 +214,12 @@ class _VpnShellState extends State<VpnShell> {
   bool _subscriptionBusy = false;
   int? _selectedIndex;
   final Map<int, int> _profilePings = {};
+  final Set<int> _failedPings = {};
   final Set<int> _probingProfiles = {};
+  String? _batchPingSubscriptionId;
+  int _batchPingCompleted = 0;
+  int _batchPingTotal = 0;
+  bool _cancelBatchPing = false;
   final Set<String> _excludedPackages = {};
   static const MethodChannel _appPickerChannel =
       MethodChannel('v2rayag/app_picker');
@@ -487,17 +492,89 @@ class _VpnShellState extends State<VpnShell> {
     );
   }
 
-  Future<void> _testProfileLatency(int index) async {
-    if (_subscriptionBusy || _engine.connected || _engine.connecting || _engine.disconnecting || _engine.busy) return;
-    if (index < 0 || index >= _profiles.length || _probingProfiles.contains(index)) return;
-    setState(() => _probingProfiles.add(index));
+  Future<int?> _probeProfile(int index) async {
+    if (index < 0 || index >= _profiles.length || _probingProfiles.contains(index)) {
+      return null;
+    }
+    setState(() {
+      _probingProfiles.add(index);
+      _profilePings.remove(index);
+      _failedPings.remove(index);
+    });
     final result = await _engine.measurePing(_profiles[index]);
-    if (!mounted) return;
+    if (!mounted) return null;
     setState(() {
       _probingProfiles.remove(index);
-      if (result != null) _profilePings[index] = result;
+      if (result != null) {
+        _profilePings[index] = result;
+        _failedPings.remove(index);
+      } else {
+        _failedPings.add(index);
+      }
     });
-    if (result == null && _engine.message != null) _showMessage(_engine.message!);
+    return result;
+  }
+
+  Future<void> _testProfileLatency(int index) async {
+    if (_subscriptionBusy || _batchPingSubscriptionId != null || _engine.connected ||
+        _engine.connecting || _engine.disconnecting || _engine.busy) return;
+    if (index < 0 || index >= _profiles.length || _probingProfiles.contains(index)) return;
+    final result = await _probeProfile(index);
+    if (result == null && mounted && _engine.message != null) {
+      _showMessage(_engine.message!);
+    }
+  }
+
+  Future<void> _testSubscriptionPings(SavedSubscription subscription) async {
+    if (_subscriptionBusy || _batchPingSubscriptionId != null || _engine.connected ||
+        _engine.connecting || _engine.disconnecting || _engine.busy) return;
+    final indices = <int>[
+      for (var i = 0; i < _profiles.length; i++)
+        if (i < _profileSources.length && _profileSources[i] == subscription.id) i,
+    ];
+    if (indices.isEmpty) {
+      _showMessage('Refresh this subscription to load its profiles before testing.');
+      return;
+    }
+    setState(() {
+      _subscriptionBusy = true;
+      _batchPingSubscriptionId = subscription.id;
+      _batchPingCompleted = 0;
+      _batchPingTotal = indices.length;
+      _cancelBatchPing = false;
+      _profilePings.removeWhere((index, _) => indices.contains(index));
+      _failedPings.removeAll(indices);
+    });
+    var responded = 0;
+    var attempted = 0;
+    try {
+      for (final index in indices) {
+        if (_cancelBatchPing || !mounted) break;
+        final result = await _probeProfile(index);
+        attempted++;
+        if (result != null) responded++;
+        if (mounted) setState(() => _batchPingCompleted = attempted);
+      }
+    } finally {
+      final cancelled = _cancelBatchPing;
+      if (mounted) {
+        setState(() {
+          _subscriptionBusy = false;
+          _batchPingSubscriptionId = null;
+          _batchPingCompleted = 0;
+          _batchPingTotal = 0;
+        });
+        _showMessage(cancelled
+            ? 'Latency test stopped after $attempted of ${indices.length} profiles.'
+            : 'Latency test complete: $responded of ${indices.length} profiles returned a result.');
+      }
+      _cancelBatchPing = false;
+    }
+  }
+
+  void _cancelSubscriptionPings() {
+    if (_batchPingSubscriptionId == null) return;
+    setState(() => _cancelBatchPing = true);
   }
 
   void _selectProfile(int index) {
@@ -661,6 +738,7 @@ class _VpnShellState extends State<VpnShell> {
           ..clear()
           ..addAll(retainedSources);
         _profilePings.clear();
+        _failedPings.clear();
         _probingProfiles.clear();
         _selectedIndex = selectedConfig == null
             ? null
@@ -715,6 +793,7 @@ class _VpnShellState extends State<VpnShell> {
           ..addAll(retainedSources)
           ..addAll(List<String?>.filled(profiles.length, sourceId));
         _profilePings.clear();
+        _failedPings.clear();
         _probingProfiles.clear();
         final preservedIndex = selectedConfig == null
             ? -1
@@ -747,6 +826,7 @@ class _VpnShellState extends State<VpnShell> {
       _profiles.removeAt(index);
       if (index < _profileSources.length) _profileSources.removeAt(index);
       _profilePings.clear();
+      _failedPings.clear();
       _probingProfiles.clear();
       if (_profiles.isEmpty) {
         _selectedIndex = null;
@@ -770,7 +850,7 @@ class _VpnShellState extends State<VpnShell> {
         onToggleConnection: _toggleConnection,
         onMeasurePing: _measurePing,
         onShowDiagnostics: _showConnectionDiagnostics,
-        subscriptionBusy: _subscriptionBusy,
+        subscriptionBusy: _subscriptionBusy || _batchPingSubscriptionId != null,
       ),
       _ProfilesPage(
         profiles: _profiles,
@@ -782,6 +862,7 @@ class _VpnShellState extends State<VpnShell> {
         onSelect: _selectProfile,
         onRemove: _removeProfile,
         profilePings: _profilePings,
+        failedPings: _failedPings,
         probingProfiles: _probingProfiles,
         onTestProfileLatency: _testProfileLatency,
         subscriptions: _savedSubscriptions,
@@ -789,6 +870,11 @@ class _VpnShellState extends State<VpnShell> {
         onEditSubscription: _editSavedSubscription,
         onRemoveSubscription: _removeSubscription,
         onRefreshSubscription: _refreshSubscription,
+        onTestSubscriptionPings: _testSubscriptionPings,
+        onCancelSubscriptionPings: _cancelSubscriptionPings,
+        pingingSubscriptionId: _batchPingSubscriptionId,
+        pingBatchCompleted: _batchPingCompleted,
+        pingBatchTotal: _batchPingTotal,
         subscriptionBusy: _subscriptionBusy,
       ),
       _SettingsPage(
@@ -1216,6 +1302,7 @@ class _ProfilesPage extends StatelessWidget {
     required this.onSelect,
     required this.onRemove,
     required this.profilePings,
+    required this.failedPings,
     required this.probingProfiles,
     required this.onTestProfileLatency,
     required this.subscriptions,
@@ -1223,6 +1310,11 @@ class _ProfilesPage extends StatelessWidget {
     required this.onEditSubscription,
     required this.onRemoveSubscription,
     required this.onRefreshSubscription,
+    required this.onTestSubscriptionPings,
+    required this.onCancelSubscriptionPings,
+    required this.pingingSubscriptionId,
+    required this.pingBatchCompleted,
+    required this.pingBatchTotal,
     required this.subscriptionBusy,
   });
 
@@ -1235,6 +1327,7 @@ class _ProfilesPage extends StatelessWidget {
   final ValueChanged<int> onSelect;
   final ValueChanged<int> onRemove;
   final Map<int, int> profilePings;
+  final Set<int> failedPings;
   final Set<int> probingProfiles;
   final ValueChanged<int> onTestProfileLatency;
   final List<SavedSubscription> subscriptions;
@@ -1242,6 +1335,11 @@ class _ProfilesPage extends StatelessWidget {
   final ValueChanged<SavedSubscription> onEditSubscription;
   final ValueChanged<SavedSubscription> onRemoveSubscription;
   final Future<void> Function(SavedSubscription) onRefreshSubscription;
+  final Future<void> Function(SavedSubscription) onTestSubscriptionPings;
+  final VoidCallback onCancelSubscriptionPings;
+  final String? pingingSubscriptionId;
+  final int pingBatchCompleted;
+  final int pingBatchTotal;
   final bool subscriptionBusy;
 
   Widget _profileCard(BuildContext context, int index, bool dark) {
@@ -1284,6 +1382,9 @@ class _ProfilesPage extends StatelessWidget {
             if (profilePings[index] != null)
               Text('${context.tr('Latency')}: ${profilePings[index]} ms',
                   style: const TextStyle(color: _muted, fontSize: 12)),
+            if (failedPings.contains(index))
+              Text(context.tr('No ping response'),
+                  style: const TextStyle(color: _coral, fontSize: 12)),
           ],
         ),
         isThreeLine: true,
@@ -1332,6 +1433,15 @@ class _ProfilesPage extends StatelessWidget {
             for (var i = 0; i < profiles.length; i++)
               if (i < profileSources.length && profileSources[i] == subscription.id) i,
           ];
+          indices.sort((a, b) {
+            final pingA = profilePings[a];
+            final pingB = profilePings[b];
+            if (pingA == null && pingB == null) return a.compareTo(b);
+            if (pingA == null) return 1;
+            if (pingB == null) return -1;
+            return pingA.compareTo(pingB);
+          });
+          final isPinging = pingingSubscriptionId == subscription.id;
           return Card(
             elevation: 0,
             color: dark ? const Color(0xFF192321) : Colors.white,
@@ -1339,8 +1449,21 @@ class _ProfilesPage extends StatelessWidget {
               ListTile(
                 leading: CircleAvatar(backgroundColor: dark ? const Color(0xFF213B34) : const Color(0xFFE5F6EF), child: Icon(Icons.rss_feed_rounded, color: dark ? const Color(0xFF7AD9B7) : const Color(0xFF317D68))),
                 title: Text(subscription.name, maxLines: 1, overflow: TextOverflow.ellipsis),
-                subtitle: const LocalizedText('Private URL stored on this device'),
+                subtitle: Text(isPinging
+                    ? '${context.tr('Testing pings')}: ${pingBatchCompleted < pingBatchTotal ? pingBatchCompleted + 1 : pingBatchTotal}/$pingBatchTotal'
+                    : context.tr('Private URL stored on this device')),
                 trailing: Wrap(spacing: 0, children: [
+                  IconButton(
+                    tooltip: context.tr(isPinging ? 'Stop ping test' : 'Test all server pings'),
+                    onPressed: isPinging
+                        ? onCancelSubscriptionPings
+                        : (connected || subscriptionBusy
+                            ? null
+                            : () => onTestSubscriptionPings(subscription)),
+                    icon: isPinging
+                        ? const Icon(Icons.stop_circle_outlined, color: _coral)
+                        : const Icon(Icons.speed_rounded),
+                  ),
                   IconButton(tooltip: context.tr('Refresh servers'), onPressed: connected || subscriptionBusy ? null : () => onRefreshSubscription(subscription), icon: const Icon(Icons.refresh_rounded)),
                   IconButton(tooltip: context.tr('Edit subscription'), onPressed: connected || subscriptionBusy ? null : () => onEditSubscription(subscription), icon: const Icon(Icons.edit_outlined)),
                   IconButton(tooltip: context.tr('Remove subscription'), onPressed: connected || subscriptionBusy ? null : () => onRemoveSubscription(subscription), icon: const Icon(Icons.delete_outline_rounded)),

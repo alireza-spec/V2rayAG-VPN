@@ -46,6 +46,18 @@ class V2rayLocalizations {
     if (grouped != null) {
       return '${grouped.group(1)} نمایه برای اشتراک «${grouped.group(2)}» بارگذاری شد.';
     }
+    final pingComplete = RegExp(
+      r'^Latency test complete: (\d+) of (\d+) profiles returned a result\.$',
+    ).firstMatch(source);
+    if (pingComplete != null) {
+      return 'آزمایش تأخیر تمام شد: از ${pingComplete.group(2)} نمایه، برای ${pingComplete.group(1)} مورد نتیجه دریافت شد.';
+    }
+    final pingStopped = RegExp(
+      r'^Latency test stopped after (\d+) of (\d+) profiles\.$',
+    ).firstMatch(source);
+    if (pingStopped != null) {
+      return 'آزمایش پس از ${pingStopped.group(1)} از ${pingStopped.group(2)} نمایه متوقف شد.';
+    }
     final added = RegExp(r'^Added (\d+) server profiles to this session\.$')
         .firstMatch(source);
     if (added != null) {
@@ -128,6 +140,11 @@ class V2rayLocalizations {
     'My subscriptions': 'اشتراک‌های من',
     'Server configurations': 'کانفیگ‌های این اشتراک',
     'profiles': 'کانفیگ',
+    'Test all server pings': 'آزمایش پینگ همهٔ سرورها',
+    'Stop ping test': 'توقف آزمایش پینگ',
+    'Testing pings': 'در حال آزمایش پینگ',
+    'No ping response': 'پاسخ پینگ دریافت نشد',
+    'Refresh this subscription to load its profiles before testing.': 'پیش از آزمایش، این اشتراک را تازه‌سازی کنید تا کانفیگ‌هایش بارگذاری شوند.',
     'Refresh this subscription to load its profiles': 'برای دریافت کانفیگ‌ها، این اشتراک را تازه‌سازی کنید',
     'No profiles loaded yet.': 'هنوز کانفیگی بارگذاری نشده است.',
     'Pasted server links': 'کانفیگ‌های واردشده از متن',
