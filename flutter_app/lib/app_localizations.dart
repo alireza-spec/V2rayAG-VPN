@@ -42,6 +42,10 @@ class V2rayLocalizations {
           : '';
       return '${loaded.group(1)} نمایهٔ سرور در حافظهٔ برنامه بارگذاری شد.$selectionHint';
     }
+    final grouped = RegExp(r'^Loaded (\d+) profiles for (.+)\.$').firstMatch(source);
+    if (grouped != null) {
+      return '${grouped.group(1)} نمایه برای اشتراک «${grouped.group(2)}» بارگذاری شد.';
+    }
     final added = RegExp(r'^Added (\d+) server profiles to this session\.$')
         .firstMatch(source);
     if (added != null) {
@@ -122,6 +126,11 @@ class V2rayLocalizations {
     'One-tap connect': 'اتصال با یک ضربه',
     'Change URL': 'تغییر نشانی',
     'My subscriptions': 'اشتراک‌های من',
+    'Server configurations': 'کانفیگ‌های این اشتراک',
+    'profiles': 'کانفیگ',
+    'Refresh this subscription to load its profiles': 'برای دریافت کانفیگ‌ها، این اشتراک را تازه‌سازی کنید',
+    'No profiles loaded yet.': 'هنوز کانفیگی بارگذاری نشده است.',
+    'Pasted server links': 'کانفیگ‌های واردشده از متن',
     'Add': 'افزودن',
     'Paste a secure HTTPS URL or scan its QR code. URLs are stored on this device only.': 'نشانی امن HTTPS را جای‌گذاری یا QR آن را اسکن کنید. نشانی‌ها فقط در این دستگاه ذخیره می‌شوند.',
     'Private URL stored on this device': 'نشانی خصوصی در این دستگاه ذخیره شده است',

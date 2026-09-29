@@ -204,6 +204,8 @@ class VpnShell extends StatefulWidget {
 class _VpnShellState extends State<VpnShell> {
   int _tab = 0;
   final List<VpnProfile> _profiles = [];
+  // Parallel to _profiles: saved-subscription ID, or null for pasted links.
+  final List<String?> _profileSources = [];
   final VpnEngine _engine = VpnEngine();
   final SubscriptionRepository _subscriptionRepository = SubscriptionRepository();
   final Completer<void> _subscriptionsReady = Completer<void>();
@@ -540,7 +542,8 @@ class _VpnShellState extends State<VpnShell> {
     setState(() {
       final firstNewIndex = _profiles.length;
       _profiles.addAll(added);
-      _selectedIndex = firstNewIndex;
+      _profileSources.addAll(List<String?>.filled(added.length, null));
+      _selectedIndex ??= firstNewIndex;
       _tab = 1;
     });
     _showMessage('Added ${added.length} server profiles to this session.');
@@ -636,9 +639,34 @@ class _VpnShellState extends State<VpnShell> {
     await _subscriptionsReady.future;
     if (!mounted) return;
     final next = _savedSubscriptions.where((item) => item.id != subscription.id).toList();
+    final selectedConfig = _selectedIndex != null && _selectedIndex! < _profiles.length
+        ? _profiles[_selectedIndex!].config
+        : null;
     try {
       await _subscriptionRepository.saveAll(next);
-      if (mounted) setState(() => _savedSubscriptions = next);
+      if (!mounted) return;
+      setState(() {
+        _savedSubscriptions = next;
+        final retained = <VpnProfile>[];
+        final retainedSources = <String?>[];
+        for (var i = 0; i < _profiles.length; i++) {
+          if (_profileSources[i] == subscription.id) continue;
+          retained.add(_profiles[i]);
+          retainedSources.add(_profileSources[i]);
+        }
+        _profiles
+          ..clear()
+          ..addAll(retained);
+        _profileSources
+          ..clear()
+          ..addAll(retainedSources);
+        _profilePings.clear();
+        _probingProfiles.clear();
+        _selectedIndex = selectedConfig == null
+            ? null
+            : _profiles.indexWhere((profile) => profile.config == selectedConfig);
+        if (_selectedIndex != null && _selectedIndex! < 0) _selectedIndex = null;
+      });
       _showMessage('Saved subscription removed from this device.');
     } on Object {
       _showMessage('Could not remove the saved subscription.');
@@ -662,16 +690,43 @@ class _VpnShellState extends State<VpnShell> {
         _showMessage('Disconnect before refreshing subscriptions.');
         return;
       }
+      final sourceId = _savedSubscriptions.any((item) => item.id == subscription.id)
+          ? subscription.id
+          : null;
+      final selectedConfig = _selectedIndex != null && _selectedIndex! < _profiles.length
+          ? _profiles[_selectedIndex!].config
+          : null;
+      final retainedProfiles = <VpnProfile>[];
+      final retainedSources = <String?>[];
+      for (var i = 0; i < _profiles.length; i++) {
+        if (sourceId != null && _profileSources[i] == sourceId) continue;
+        retainedProfiles.add(_profiles[i]);
+        retainedSources.add(_profileSources[i]);
+      }
+      // Keep the same server in separate subscriptions visible under each
+      // named group; deduplication is performed within each imported payload.
       setState(() {
         _profiles
           ..clear()
+          ..addAll(retainedProfiles)
           ..addAll(profiles);
+        _profileSources
+          ..clear()
+          ..addAll(retainedSources)
+          ..addAll(List<String?>.filled(profiles.length, sourceId));
         _profilePings.clear();
         _probingProfiles.clear();
-        _selectedIndex = 0;
+        final preservedIndex = selectedConfig == null
+            ? -1
+            : _profiles.indexWhere((profile) => profile.config == selectedConfig);
+        _selectedIndex = preservedIndex >= 0
+            ? preservedIndex
+            : (selectedConfig == null && profiles.isNotEmpty
+                ? retainedProfiles.length
+                : null);
         _tab = 1;
       });
-      _showMessage('Loaded ${profiles.length} server profiles into app memory. Select a profile before connecting.');
+      _showMessage('Loaded ${profiles.length} profiles for ${subscription.name}.');
     } on FormatException catch (error) {
       // Show only fixed, credential-free parser/fetch messages.
       if (mounted) _showMessage(error.message);
@@ -690,6 +745,7 @@ class _VpnShellState extends State<VpnShell> {
     }
     setState(() {
       _profiles.removeAt(index);
+      if (index < _profileSources.length) _profileSources.removeAt(index);
       _profilePings.clear();
       _probingProfiles.clear();
       if (_profiles.isEmpty) {
@@ -718,6 +774,7 @@ class _VpnShellState extends State<VpnShell> {
       ),
       _ProfilesPage(
         profiles: _profiles,
+        profileSources: _profileSources,
         selectedIndex: _selectedIndex,
         showDestination: widget.showDestination,
         connected: _engine.connected || _engine.connecting || _engine.disconnecting,
@@ -1151,6 +1208,7 @@ class _PowerOrbState extends State<_PowerOrb> with SingleTickerProviderStateMixi
 class _ProfilesPage extends StatelessWidget {
   const _ProfilesPage({
     required this.profiles,
+    required this.profileSources,
     required this.selectedIndex,
     required this.showDestination,
     required this.connected,
@@ -1169,6 +1227,7 @@ class _ProfilesPage extends StatelessWidget {
   });
 
   final List<VpnProfile> profiles;
+  final List<String?> profileSources;
   final int? selectedIndex;
   final bool showDestination;
   final bool connected;
@@ -1184,6 +1243,70 @@ class _ProfilesPage extends StatelessWidget {
   final ValueChanged<SavedSubscription> onRemoveSubscription;
   final Future<void> Function(SavedSubscription) onRefreshSubscription;
   final bool subscriptionBusy;
+
+  Widget _profileCard(BuildContext context, int index, bool dark) {
+    final profile = profiles[index];
+    final active = index == selectedIndex;
+    return Card(
+      elevation: 0,
+      color: dark ? const Color(0xFF192321) : Colors.white,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(20),
+        side: BorderSide(
+          color: active
+              ? const Color(0xFF52C59E)
+              : (dark ? Colors.white12 : Colors.black12),
+          width: active ? 1.5 : 1,
+        ),
+      ),
+      child: ListTile(
+        onTap: () => onSelect(index),
+        leading: CircleAvatar(
+          backgroundColor: dark ? const Color(0xFF213B34) : const Color(0xFFE5F6EF),
+          child: Text(
+            profile.protocol.substring(0, 1),
+            style: TextStyle(
+              color: dark ? const Color(0xFF7AD9B7) : const Color(0xFF317D68),
+              fontWeight: FontWeight.w800,
+            ),
+          ),
+        ),
+        title: Text(profile.name, maxLines: 1, overflow: TextOverflow.ellipsis,
+            style: const TextStyle(fontWeight: FontWeight.w700)),
+        subtitle: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Directionality(
+              textDirection: TextDirection.ltr,
+              child: Text('${profile.protocol} · ${showDestination ? profile.destination : context.tr('Destination hidden')}'),
+            ),
+            Text('${context.tr('Country not looked up')} · ${context.tr(active && connected ? 'connected' : 'ready')}'),
+            if (profilePings[index] != null)
+              Text('${context.tr('Latency')}: ${profilePings[index]} ms',
+                  style: const TextStyle(color: _muted, fontSize: 12)),
+          ],
+        ),
+        isThreeLine: true,
+        trailing: Wrap(spacing: 0, children: [
+          IconButton(
+            tooltip: context.tr('Test latency'),
+            onPressed: connected || subscriptionBusy || probingProfiles.contains(index)
+                ? null
+                : () => onTestProfileLatency(index),
+            icon: probingProfiles.contains(index)
+                ? const SizedBox(width: 18, height: 18,
+                    child: CircularProgressIndicator(strokeWidth: 2))
+                : const Icon(Icons.speed_rounded),
+          ),
+          IconButton(
+            tooltip: context.tr('Remove profile'),
+            onPressed: connected && active ? null : () => onRemove(index),
+            icon: const Icon(Icons.close_rounded),
+          ),
+        ]),
+      ),
+    );
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -1204,69 +1327,50 @@ class _ProfilesPage extends StatelessWidget {
           child: LocalizedText('Paste a secure HTTPS URL or scan its QR code. URLs are stored on this device only.', style: TextStyle(color: _muted, fontSize: 12)),
         )
       else
-        ...customSubscriptions.map((subscription) => Card(
-          elevation: 0,
-          color: dark ? const Color(0xFF192321) : Colors.white,
-          child: ListTile(
-            leading: CircleAvatar(backgroundColor: dark ? const Color(0xFF213B34) : const Color(0xFFE5F6EF), child: Icon(Icons.rss_feed_rounded, color: dark ? const Color(0xFF7AD9B7) : const Color(0xFF317D68))),
-            title: Text(subscription.name, maxLines: 1, overflow: TextOverflow.ellipsis),
-            subtitle: const LocalizedText('Private URL stored on this device'),
-            trailing: Wrap(spacing: 0, children: [
-              IconButton(tooltip: context.tr('Refresh servers'), onPressed: connected || subscriptionBusy ? null : () => onRefreshSubscription(subscription), icon: const Icon(Icons.refresh_rounded)),
-              IconButton(tooltip: context.tr('Edit subscription'), onPressed: connected || subscriptionBusy ? null : () => onEditSubscription(subscription), icon: const Icon(Icons.edit_outlined)),
-              IconButton(tooltip: context.tr('Remove subscription'), onPressed: connected || subscriptionBusy ? null : () => onRemoveSubscription(subscription), icon: const Icon(Icons.delete_outline_rounded)),
+        ...customSubscriptions.map((subscription) {
+          final indices = <int>[
+            for (var i = 0; i < profiles.length; i++)
+              if (i < profileSources.length && profileSources[i] == subscription.id) i,
+          ];
+          return Card(
+            elevation: 0,
+            color: dark ? const Color(0xFF192321) : Colors.white,
+            child: Column(children: [
+              ListTile(
+                leading: CircleAvatar(backgroundColor: dark ? const Color(0xFF213B34) : const Color(0xFFE5F6EF), child: Icon(Icons.rss_feed_rounded, color: dark ? const Color(0xFF7AD9B7) : const Color(0xFF317D68))),
+                title: Text(subscription.name, maxLines: 1, overflow: TextOverflow.ellipsis),
+                subtitle: const LocalizedText('Private URL stored on this device'),
+                trailing: Wrap(spacing: 0, children: [
+                  IconButton(tooltip: context.tr('Refresh servers'), onPressed: connected || subscriptionBusy ? null : () => onRefreshSubscription(subscription), icon: const Icon(Icons.refresh_rounded)),
+                  IconButton(tooltip: context.tr('Edit subscription'), onPressed: connected || subscriptionBusy ? null : () => onEditSubscription(subscription), icon: const Icon(Icons.edit_outlined)),
+                  IconButton(tooltip: context.tr('Remove subscription'), onPressed: connected || subscriptionBusy ? null : () => onRemoveSubscription(subscription), icon: const Icon(Icons.delete_outline_rounded)),
+                ]),
+              ),
+              ExpansionTile(
+                title: const LocalizedText('Server configurations'),
+                subtitle: Text(indices.isEmpty ? context.tr('Refresh this subscription to load its profiles') : '${indices.length} ${context.tr('profiles')}'),
+                children: indices.isEmpty
+                    ? [const ListTile(title: LocalizedText('No profiles loaded yet.'))]
+                    : indices.map((index) => _profileCard(context, index, dark)).toList(),
+              ),
             ]),
-          ),
-        )),
+          );
+        }),
       const SizedBox(height: 10),
       FilledButton.tonalIcon(onPressed: connected || subscriptionBusy ? null : onImport, icon: const Icon(Icons.add_link_rounded), label: const LocalizedText('Import server links')),
       const SizedBox(height: 14),
       if (profiles.isEmpty)
         _EmptyCard(dark: dark)
-      else
-        ...profiles.asMap().entries.map((entry) {
-          final index = entry.key;
-          final profile = entry.value;
-          final active = index == selectedIndex;
-          return Card(
-            elevation: 0,
-            color: dark ? const Color(0xFF192321) : Colors.white,
-            shape: RoundedRectangleBorder(
-              borderRadius: BorderRadius.circular(20),
-              side: BorderSide(color: active ? const Color(0xFF52C59E) : (dark ? Colors.white12 : Colors.black12), width: active ? 1.5 : 1),
-            ),
-            child: ListTile(
-              onTap: () => onSelect(index),
-              leading: CircleAvatar(backgroundColor: dark ? const Color(0xFF213B34) : const Color(0xFFE5F6EF), child: Text(profile.protocol.substring(0, 1), style: TextStyle(color: dark ? const Color(0xFF7AD9B7) : const Color(0xFF317D68), fontWeight: FontWeight.w800))),
-              title: Text(profile.name, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontWeight: FontWeight.w700)),
-              subtitle: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Directionality(
-                    textDirection: TextDirection.ltr,
-                    child: Text('${profile.protocol} · ${showDestination ? profile.destination : context.tr('Destination hidden')}'),
-                  ),
-                  Text('${context.tr('Country not looked up')} · ${context.tr(active && connected ? 'connected' : 'ready')}'),
-                  if (profilePings[index] != null)
-                    Text('${context.tr('Latency')}: ${profilePings[index]} ms', style: const TextStyle(color: _muted, fontSize: 12)),
-                ],
-              ),
-              isThreeLine: true,
-              trailing: Wrap(spacing: 0, children: [
-                IconButton(
-                  tooltip: context.tr('Test latency'),
-                  onPressed: connected || subscriptionBusy || probingProfiles.contains(index)
-                      ? null
-                      : () => onTestProfileLatency(index),
-                  icon: probingProfiles.contains(index)
-                      ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2))
-                      : const Icon(Icons.speed_rounded),
-                ),
-                IconButton(tooltip: context.tr('Remove profile'), onPressed: connected && active ? null : () => onRemove(index), icon: const Icon(Icons.close_rounded)),
-              ]),
-            ),
-          );
-        }),
+      else ...[
+        if (profiles.asMap().keys.any((i) => i >= profileSources.length || profileSources[i] == null))
+          const Padding(
+            padding: EdgeInsets.only(top: 8, bottom: 4),
+            child: LocalizedText('Pasted server links', style: TextStyle(fontWeight: FontWeight.w800)),
+          ),
+        ...profiles.asMap().keys
+            .where((i) => i >= profileSources.length || profileSources[i] == null)
+            .map((index) => _profileCard(context, index, dark)),
+      ],
       const SizedBox(height: 12),
       const LocalizedText('Profile configs exist only in app memory during this session. Do not share screenshots or logs that reveal a server address.', style: TextStyle(fontSize: 12, color: _muted, height: 1.45)),
     ]);
