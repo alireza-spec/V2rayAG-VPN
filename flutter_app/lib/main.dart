@@ -1,20 +1,28 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
 
 import 'app_localizations.dart';
+import 'app_preferences.dart';
 import 'language_preferences.dart';
 import 'subscription_service.dart';
 import 'vpn_engine.dart';
 import 'vpn_profile.dart';
 
-void main() => runApp(const V2rayAgApp());
+Future<void> main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  runApp(const V2rayAgApp());
+}
 
 const _ink = Color(0xFF182321);
 const _muted = Color(0xFF778581);
 const _mint = Color(0xFF51D6AF);
 const _coral = Color(0xFFFF886E);
 const _canvas = Color(0xFFF6F7F3);
+
+enum _SubscriptionSaveChoice { saved, useOnce, cancelled }
 
 extension _FirstOrNull<T> on Iterable<T> {
   T? get firstOrNull {
@@ -36,13 +44,52 @@ class _V2rayAgAppState extends State<V2rayAgApp> {
   bool _showDestination = true;
   Locale _locale = const Locale('en');
   bool _languageChangedByUser = false;
+  bool _appearanceChangedByUser = false;
   final LanguagePreferenceRepository _languagePreferences =
       LanguagePreferenceRepository();
+  final AppAppearancePreferences _appearancePreferences =
+      AppAppearancePreferences();
 
   @override
   void initState() {
     super.initState();
     _restoreLanguage();
+    _restoreAppearance();
+  }
+
+  Future<void> _restoreAppearance() async {
+    final preferences = await _appearancePreferences.read();
+    if (!mounted || _appearanceChangedByUser) return;
+    setState(() {
+      _themeMode = preferences.darkMode ? ThemeMode.dark : ThemeMode.light;
+      _reducedMotion = preferences.reducedMotion;
+      _showDestination = preferences.showDestination;
+    });
+  }
+
+  Future<void> _saveAppearance() async {
+    try {
+      await _appearancePreferences.save(AppearancePreferences(
+        darkMode: _themeMode == ThemeMode.dark,
+        reducedMotion: _reducedMotion,
+        showDestination: _showDestination,
+      ));
+    } on Object {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: LocalizedText('Appearance choices may reset after restarting the app.')),
+      );
+    }
+  }
+
+  void _changeAppearance({bool? darkMode, bool? reducedMotion, bool? showDestination}) {
+    _appearanceChangedByUser = true;
+    setState(() {
+      if (darkMode != null) _themeMode = darkMode ? ThemeMode.dark : ThemeMode.light;
+      if (reducedMotion != null) _reducedMotion = reducedMotion;
+      if (showDestination != null) _showDestination = showDestination;
+    });
+    unawaited(_saveAppearance());
   }
 
   Future<void> _restoreLanguage() async {
@@ -70,19 +117,35 @@ class _V2rayAgAppState extends State<V2rayAgApp> {
   Widget build(BuildContext context) {
     ThemeData buildTheme(Brightness brightness) {
       final dark = brightness == Brightness.dark;
+      final surface = dark ? const Color(0xFF17211F) : Colors.white;
       return ThemeData(
         useMaterial3: true,
-        scaffoldBackgroundColor: dark ? const Color(0xFF101817) : _canvas,
+        scaffoldBackgroundColor: dark ? const Color(0xFF0D1412) : _canvas,
+        canvasColor: dark ? const Color(0xFF0D1412) : _canvas,
+        cardColor: surface,
+        dialogBackgroundColor: surface,
+        dividerColor: dark ? const Color(0xFF2C3A36) : const Color(0xFFE4E9E5),
         colorScheme: ColorScheme.fromSeed(
           seedColor: const Color(0xFF2E9478),
           brightness: brightness,
-          surface: dark ? const Color(0xFF17211F) : Colors.white,
+          surface: surface,
         ),
         fontFamily: 'Roboto',
         appBarTheme: AppBarTheme(
-          backgroundColor: dark ? const Color(0xFF101817) : _canvas,
+          backgroundColor: dark ? const Color(0xFF0D1412) : _canvas,
           foregroundColor: dark ? Colors.white : _ink,
           surfaceTintColor: Colors.transparent,
+        ),
+        bottomSheetTheme: BottomSheetThemeData(backgroundColor: surface),
+        popupMenuTheme: PopupMenuThemeData(color: surface),
+        navigationBarTheme: NavigationBarThemeData(
+          backgroundColor: dark ? const Color(0xFF111A17) : const Color(0xFFEAF0EC),
+          indicatorColor: dark ? const Color(0xFF25443A) : const Color(0xFFD5EEE4),
+        ),
+        snackBarTheme: SnackBarThemeData(
+          backgroundColor: const Color(0xFF26332F),
+          contentTextStyle: const TextStyle(color: Colors.white),
+          behavior: SnackBarBehavior.floating,
         ),
       );
     }
@@ -101,11 +164,9 @@ class _V2rayAgAppState extends State<V2rayAgApp> {
         onLocaleChanged: _changeLanguage,
         reducedMotion: _reducedMotion,
         showDestination: _showDestination,
-        onReducedMotionChanged: (value) => setState(() => _reducedMotion = value),
-        onShowDestinationChanged: (value) => setState(() => _showDestination = value),
-        onThemeChanged: (value) => setState(
-          () => _themeMode = value ? ThemeMode.dark : ThemeMode.light,
-        ),
+        onReducedMotionChanged: (value) => _changeAppearance(reducedMotion: value),
+        onShowDestinationChanged: (value) => _changeAppearance(showDestination: value),
+        onThemeChanged: (value) => _changeAppearance(darkMode: value),
         darkMode: _themeMode == ThemeMode.dark,
       ),
     );
@@ -182,6 +243,10 @@ class _VpnShellState extends State<VpnShell> {
   }
 
   Future<void> _toggleConnection() async {
+    if (_subscriptionBusy) {
+      _showMessage('Wait for the subscription operation to finish.');
+      return;
+    }
     final profile = _selectedIndex == null ? null : _profiles[_selectedIndex!];
     if (profile == null) {
       _showMessage('Import a server link first.');
@@ -196,6 +261,7 @@ class _VpnShellState extends State<VpnShell> {
   }
 
   Future<void> _measurePing() async {
+    if (_subscriptionBusy) return;
     final profile = _selectedIndex == null ? null : _profiles[_selectedIndex!];
     if (profile == null) return;
     final result = await _engine.measurePing(profile);
@@ -207,7 +273,62 @@ class _VpnShellState extends State<VpnShell> {
     }
   }
 
+  Future<void> _showConnectionDiagnostics() async {
+    final approved = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const LocalizedText('Review connection diagnostics'),
+        content: const LocalizedText(
+          'Diagnostics can include server addresses, destinations, and local paths. Review and redact them before sharing. Nothing is sent automatically.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(false),
+            child: const LocalizedText('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(dialogContext).pop(true),
+            child: const LocalizedText('Show details'),
+          ),
+        ],
+      ),
+    );
+    if (approved != true || !mounted) return;
+    final details = await _engine.getSupportDiagnostics();
+    if (!mounted) return;
+    await showDialog<void>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const LocalizedText('Connection details'),
+        content: SizedBox(
+          width: double.maxFinite,
+          height: MediaQuery.sizeOf(context).height * .52,
+          child: SingleChildScrollView(
+            child: SelectableText(details, style: const TextStyle(fontSize: 12)),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(),
+            child: const LocalizedText('Close'),
+          ),
+          TextButton.icon(
+            onPressed: () async {
+              await Clipboard.setData(ClipboardData(text: details));
+              if (!mounted) return;
+              Navigator.of(dialogContext).pop();
+              _showMessage('Copied to clipboard. Review and redact before sharing.');
+            },
+            icon: const Icon(Icons.copy_rounded),
+            label: const LocalizedText('Copy diagnostics'),
+          ),
+        ],
+      ),
+    );
+  }
+
   void _selectProfile(int index) {
+    if (_subscriptionBusy) return;
     if (_engine.connected || _engine.connecting || _engine.disconnecting) {
       _showMessage('Disconnect before changing the active server.');
       return;
@@ -216,6 +337,10 @@ class _VpnShellState extends State<VpnShell> {
   }
 
   Future<void> _importProfile() async {
+    if (_subscriptionBusy) {
+      _showMessage('Wait for the subscription operation to finish.');
+      return;
+    }
     if (_engine.connected || _engine.connecting || _engine.disconnecting) {
       _showMessage('Disconnect before importing another server.');
       return;
@@ -254,7 +379,9 @@ class _VpnShellState extends State<VpnShell> {
     );
   }
 
-  Future<void> _saveSubscription(SavedSubscription subscription) async {
+  Future<_SubscriptionSaveChoice> _saveSubscription(
+    SavedSubscription subscription,
+  ) async {
     final next = [..._savedSubscriptions];
     final index = next.indexWhere((item) => item.id == subscription.id);
     if (index < 0) {
@@ -262,27 +389,52 @@ class _VpnShellState extends State<VpnShell> {
     } else {
       next[index] = subscription;
     }
-    await _subscriptionRepository.saveAll(next);
-    if (mounted) setState(() => _savedSubscriptions = next);
+    try {
+      await _subscriptionRepository.saveAll(next);
+      if (mounted) setState(() => _savedSubscriptions = next);
+      return _SubscriptionSaveChoice.saved;
+    } on Object {
+      if (!mounted) return _SubscriptionSaveChoice.cancelled;
+      final useOnce = await showDialog<bool>(
+        context: context,
+        builder: (dialogContext) => AlertDialog(
+          title: const LocalizedText('Secure save is unavailable'),
+          content: const LocalizedText(
+            'Android could not save this URL in secure storage. You can use it once in this session without saving it. It will be discarded when the app closes and will not be stored as plain text.',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(dialogContext).pop(false),
+              child: const LocalizedText('Cancel'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.of(dialogContext).pop(true),
+              child: const LocalizedText('Use once'),
+            ),
+          ],
+        ),
+      );
+      return useOnce == true
+          ? _SubscriptionSaveChoice.useOnce
+          : _SubscriptionSaveChoice.cancelled;
+    }
   }
 
   Future<void> _addSubscription() async {
+    if (_subscriptionBusy) return;
     if (_engine.connected || _engine.connecting || _engine.disconnecting) {
       _showMessage('Disconnect before refreshing subscriptions.');
       return;
     }
     final subscription = await _editSubscription(exclusive: false);
     if (subscription == null || !mounted) return;
-    try {
-      await _saveSubscription(subscription);
-    } on Object {
-      _showMessage('Could not save this subscription securely on the device.');
-      return;
-    }
+    final choice = await _saveSubscription(subscription);
+    if (!mounted || choice == _SubscriptionSaveChoice.cancelled) return;
     await _refreshSubscription(subscription);
   }
 
   Future<void> _editSavedSubscription(SavedSubscription existing) async {
+    if (_subscriptionBusy) return;
     if (_engine.connected || _engine.connecting || _engine.disconnecting) {
       _showMessage('Disconnect before changing subscriptions.');
       return;
@@ -292,16 +444,13 @@ class _VpnShellState extends State<VpnShell> {
       exclusive: existing.id == _exclusiveId,
     );
     if (updated == null || !mounted) return;
-    try {
-      await _saveSubscription(updated);
-    } on Object {
-      _showMessage('Could not save this subscription securely on the device.');
-      return;
-    }
+    final choice = await _saveSubscription(updated);
+    if (!mounted || choice == _SubscriptionSaveChoice.cancelled) return;
     await _refreshSubscription(updated);
   }
 
   Future<void> _removeSubscription(SavedSubscription subscription) async {
+    if (_subscriptionBusy || _engine.connected || _engine.connecting || _engine.disconnecting) return;
     final next = _savedSubscriptions.where((item) => item.id != subscription.id).toList();
     try {
       await _subscriptionRepository.saveAll(next);
@@ -313,6 +462,7 @@ class _VpnShellState extends State<VpnShell> {
   }
 
   Future<void> _connectExclusiveSubscription() async {
+    if (_subscriptionBusy) return;
     if (_engine.connected || _engine.connecting || _engine.disconnecting) {
       _showMessage('Disconnect the current route with the power button before switching subscriptions.');
       return;
@@ -322,12 +472,8 @@ class _VpnShellState extends State<VpnShell> {
     if (subscription == null) {
       subscription = await _editSubscription(exclusive: true);
       if (subscription == null || !mounted) return;
-      try {
-        await _saveSubscription(subscription);
-      } on Object {
-        _showMessage('Could not save the subscription securely on this device.');
-        return;
-      }
+      final choice = await _saveSubscription(subscription);
+      if (!mounted || choice == _SubscriptionSaveChoice.cancelled) return;
     }
     await _refreshSubscription(subscription, connectFirst: true);
   }
@@ -346,6 +492,12 @@ class _VpnShellState extends State<VpnShell> {
     try {
       final profiles = await SubscriptionService.fetchProfiles(subscription.url);
       if (!mounted) return;
+      // Do not replace the selected profile list if Android started or restored
+      // a tunnel while the network fetch was in flight.
+      if (_engine.connected || _engine.connecting || _engine.disconnecting) {
+        _showMessage('Disconnect before refreshing subscriptions.');
+        return;
+      }
       setState(() {
         _profiles
           ..clear()
@@ -379,6 +531,7 @@ class _VpnShellState extends State<VpnShell> {
   }
 
   void _removeProfile(int index) {
+    if (_subscriptionBusy) return;
     if ((_engine.connected || _engine.connecting || _engine.disconnecting) && index == _selectedIndex) {
       _showMessage('Disconnect before removing the active server.');
       return;
@@ -407,6 +560,7 @@ class _VpnShellState extends State<VpnShell> {
         onImport: _importProfile,
         onToggleConnection: _toggleConnection,
         onMeasurePing: _measurePing,
+        onShowDiagnostics: _showConnectionDiagnostics,
         onOpenProfiles: () => setState(() => _tab = 1),
         onExclusiveConnect: _connectExclusiveSubscription,
         exclusiveReady: _savedSubscriptions.any((item) => item.id == _exclusiveId),
@@ -451,7 +605,7 @@ class _VpnShellState extends State<VpnShell> {
             Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                LocalizedText('V2rayAG', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w800)),
+                LocalizedText('V2rayAG VPN', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w800)),
                 LocalizedText('PRIVATE ROUTE', style: TextStyle(fontSize: 9, letterSpacing: 1.7, color: _muted)),
               ],
             ),
@@ -492,6 +646,7 @@ class _HomePage extends StatelessWidget {
     required this.onImport,
     required this.onToggleConnection,
     required this.onMeasurePing,
+    required this.onShowDiagnostics,
     required this.onOpenProfiles,
     required this.onExclusiveConnect,
     required this.exclusiveReady,
@@ -505,6 +660,7 @@ class _HomePage extends StatelessWidget {
   final VoidCallback onImport;
   final VoidCallback onToggleConnection;
   final VoidCallback onMeasurePing;
+  final VoidCallback onShowDiagnostics;
   final VoidCallback onOpenProfiles;
   final VoidCallback onExclusiveConnect;
   final bool exclusiveReady;
@@ -531,7 +687,11 @@ class _HomePage extends StatelessWidget {
             reducedMotion: reducedMotion,
             dark: dark,
             connected: engine.connected,
+            connecting: engine.connecting,
+            disconnecting: engine.disconnecting,
+            failed: engine.message != null && !engine.connected && !engine.connecting,
             enabled: profile != null &&
+                !subscriptionBusy &&
                 !engine.busy &&
                 (engine.canStart || engine.connected || engine.connecting || engine.disconnecting),
             onPressed: onToggleConnection,
@@ -548,14 +708,23 @@ class _HomePage extends StatelessWidget {
                     ? 'Import a server before connecting'
                     : engine.connected
                         ? 'Protected route active on this Android device'
-                        : engine.connecting
-                            ? 'Waiting for the Android tunnel status…'
-                            : engine.disconnecting
-                                ? 'Waiting for Android to confirm disconnect…'
-                                : engine.message ?? (engine.initialized ? 'Tap to request Android VPN permission' : 'Preparing Android VPN engine…'),
+                        : engine.message ??
+                            (engine.connecting
+                                ? 'Waiting for the Android tunnel status…'
+                                : engine.disconnecting
+                                    ? 'Waiting for Android to confirm disconnect…'
+                                    : engine.initialized
+                                        ? 'Tap to request Android VPN permission'
+                                        : 'Preparing Android VPN engine…'),
                 textAlign: TextAlign.center,
                 style: const TextStyle(fontSize: 12, color: _muted),
               ),
+              if (engine.message != null && profile != null)
+                TextButton.icon(
+                  onPressed: onShowDiagnostics,
+                  icon: const Icon(Icons.bug_report_outlined, size: 17),
+                  label: const LocalizedText('Review connection diagnostics'),
+                ),
             ],
           ),
         ),
@@ -633,7 +802,7 @@ class _HomePage extends StatelessWidget {
               const SizedBox(height: 10),
               Row(children: [
                 OutlinedButton.icon(
-                  onPressed: profile == null || engine.busy || engine.connecting || engine.disconnecting
+                  onPressed: profile == null || subscriptionBusy || engine.busy || engine.connecting || engine.disconnecting
                       ? null
                       : onMeasurePing,
                   icon: const Icon(Icons.speed_rounded, size: 17),
@@ -643,7 +812,7 @@ class _HomePage extends StatelessWidget {
               const SizedBox(height: 8),
               Row(children: [
                 Expanded(child: OutlinedButton.icon(
-                  onPressed: onImport,
+                  onPressed: subscriptionBusy ? null : onImport,
                   icon: const Icon(Icons.add_rounded),
                   label: const LocalizedText('Import server'),
                   style: OutlinedButton.styleFrom(shape: const StadiumBorder(), foregroundColor: const Color(0xFF317D68)),
@@ -689,62 +858,167 @@ class _HomePage extends StatelessWidget {
   }
 }
 
-class _PowerOrb extends StatelessWidget {
+class _PowerOrb extends StatefulWidget {
   const _PowerOrb({
     required this.reducedMotion,
     required this.dark,
     required this.connected,
+    required this.connecting,
+    required this.disconnecting,
+    required this.failed,
     required this.enabled,
     required this.onPressed,
   });
   final bool reducedMotion;
   final bool dark;
   final bool connected;
+  final bool connecting;
+  final bool disconnecting;
+  final bool failed;
   final bool enabled;
   final VoidCallback onPressed;
 
   @override
+  State<_PowerOrb> createState() => _PowerOrbState();
+}
+
+class _PowerOrbState extends State<_PowerOrb> with SingleTickerProviderStateMixin {
+  late final AnimationController _motion = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 1800),
+  );
+
+  @override
+  void initState() {
+    super.initState();
+    _syncMotion();
+  }
+
+  @override
+  void didUpdateWidget(covariant _PowerOrb oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.reducedMotion != widget.reducedMotion ||
+        oldWidget.connected != widget.connected ||
+        oldWidget.connecting != widget.connecting ||
+        oldWidget.disconnecting != widget.disconnecting) {
+      _syncMotion();
+    }
+  }
+
+  void _syncMotion() {
+    final active = widget.connected || widget.connecting || widget.disconnecting;
+    if (widget.reducedMotion || !active) {
+      _motion.stop();
+      _motion.value = 0;
+    } else {
+      _motion.repeat();
+    }
+  }
+
+  @override
+  void dispose() {
+    _motion.dispose();
+    super.dispose();
+  }
+
+  @override
   Widget build(BuildContext context) {
-    return AnimatedContainer(
-      duration: reducedMotion ? Duration.zero : const Duration(milliseconds: 500),
-      width: 190,
-      height: 190,
-      decoration: BoxDecoration(
-        shape: BoxShape.circle,
-        gradient: RadialGradient(colors: dark
-            ? (connected
-                ? const [Color(0xFF235447), Color(0xFF193D35), Color(0xFF182A27)]
-                : const [Color(0xFF493B50), Color(0xFF302733), Color(0xFF1B2422)])
-            : (connected
-                ? const [Color(0xFFE9FFF4), Color(0xFFC9F7E1), Color(0xFFC7E7DD)]
-                : const [Color(0xFFFFF2E9), Color(0xFFFFD6C8), Color(0xFFE8D8FF)]), stops: const [0, .66, 1]),
-        boxShadow: [BoxShadow(color: (connected ? _mint : _coral).withValues(alpha: dark ? .10 : .19), blurRadius: 38, spreadRadius: 2)],
-      ),
-      child: Center(
-        child: SizedBox(
-          width: 126,
-          height: 126,
-          child: Material(
-            color: dark ? const Color(0xFF1D2927) : Colors.white.withValues(alpha: .94),
-            shape: const CircleBorder(),
-            elevation: dark ? 1 : 8,
-            shadowColor: (connected ? const Color(0xFF2E9478) : const Color(0xFFB65D50)).withValues(alpha: .16),
-            child: InkWell(
-              customBorder: const CircleBorder(),
-              onTap: enabled ? onPressed : null,
-              child: Center(child: Icon(
-                Icons.power_settings_new_rounded,
-                size: 47,
-                color: enabled
-                    ? (connected ? const Color(0xFF67DDB7) : const Color(0xFFFF9B82))
-                    : (dark ? const Color(0xFF899691) : Colors.grey),
-              )), 
+    final accent = widget.connected ? _mint : (widget.failed ? _coral : const Color(0xFF9A83D8));
+    return AnimatedBuilder(
+      animation: _motion,
+      builder: (context, child) {
+        final pulse = widget.connected && !widget.reducedMotion
+            ? .98 + .02 * (1 + _sinPulse(_motion.value))
+            : 1.0;
+        return Transform.scale(
+          scale: pulse,
+          child: AnimatedContainer(
+            duration: widget.reducedMotion ? Duration.zero : const Duration(milliseconds: 450),
+            width: 190,
+            height: 190,
+            decoration: BoxDecoration(
+              shape: BoxShape.circle,
+              gradient: RadialGradient(
+                colors: widget.dark
+                    ? (widget.connected
+                        ? const [Color(0xFF235447), Color(0xFF193D35), Color(0xFF182A27)]
+                        : widget.failed
+                            ? const [Color(0xFF462B2B), Color(0xFF302526), Color(0xFF1B2422)]
+                            : const [Color(0xFF493B50), Color(0xFF302733), Color(0xFF1B2422)])
+                    : (widget.connected
+                        ? const [Color(0xFFE9FFF4), Color(0xFFC9F7E1), Color(0xFFC7E7DD)]
+                        : widget.failed
+                            ? const [Color(0xFFFFEEE9), Color(0xFFFFD1C5), Color(0xFFEAD9D9)]
+                            : const [Color(0xFFFFF2E9), Color(0xFFFFD6C8), Color(0xFFE8D8FF)]),
+                stops: const [0, .66, 1],
+              ),
+              boxShadow: [
+                BoxShadow(
+                  color: accent.withValues(alpha: widget.dark ? .15 : .21),
+                  blurRadius: widget.connecting || widget.connected ? 42 : 34,
+                  spreadRadius: 2,
+                ),
+              ],
+            ),
+            child: Stack(
+              alignment: Alignment.center,
+              children: [
+                if ((widget.connecting || widget.disconnecting) && !widget.reducedMotion)
+                  const SizedBox(
+                    width: 178,
+                    height: 178,
+                    child: CircularProgressIndicator(
+                      strokeWidth: 3,
+                      color: Color(0xFF6DD9B7),
+                      backgroundColor: Colors.white12,
+                    ),
+                  ),
+                SizedBox(
+                  width: 126,
+                  height: 126,
+                  child: Material(
+                    color: widget.dark ? const Color(0xFF1D2927) : Colors.white.withValues(alpha: .94),
+                    shape: const CircleBorder(),
+                    elevation: widget.dark ? 1 : 8,
+                    shadowColor: accent.withValues(alpha: .18),
+                    child: InkWell(
+                      customBorder: const CircleBorder(),
+                      onTap: widget.enabled ? widget.onPressed : null,
+                      child: Center(
+                        child: (widget.connecting && !widget.reducedMotion)
+                            ? RotationTransition(
+                                turns: _motion,
+                                child: Icon(Icons.sync_rounded, size: 43, color: accent),
+                              )
+                            : AnimatedSwitcher(
+                                duration: widget.reducedMotion ? Duration.zero : const Duration(milliseconds: 250),
+                                child: Icon(
+                                  widget.connected ? Icons.shield_rounded : Icons.power_settings_new_rounded,
+                                  key: ValueKey('${widget.connected}-${widget.failed}'),
+                                  size: 47,
+                                  color: !widget.enabled
+                                      ? (widget.dark ? const Color(0xFF899691) : Colors.grey)
+                                      : widget.connected
+                                          ? const Color(0xFF67DDB7)
+                                          : widget.failed
+                                              ? const Color(0xFFFF9B82)
+                                              : const Color(0xFF9A83D8),
+                                ),
+                              ),
+                      ),
+                    ),
+                  ),
+                ),
+              ],
             ),
           ),
-        ),
-      ),
+        );
+      },
     );
   }
+
+  double _sinPulse(double value) =>
+      (value < .5 ? value * 4 - 1 : 3 - value * 4);
 }
 
 class _ProfilesPage extends StatelessWidget {
@@ -825,7 +1099,7 @@ class _ProfilesPage extends StatelessWidget {
             Align(
               alignment: Alignment.centerRight,
               child: TextButton.icon(
-                onPressed: connected ? null : () => onEditSubscription(exclusive),
+                onPressed: connected || subscriptionBusy ? null : () => onEditSubscription(exclusive),
                 icon: const Icon(Icons.edit_outlined, size: 17),
                 label: const LocalizedText('Change URL'),
               ),
@@ -835,7 +1109,7 @@ class _ProfilesPage extends StatelessWidget {
       const SizedBox(height: 16),
       Row(children: [
         const Expanded(child: LocalizedText('My subscriptions', style: TextStyle(fontSize: 17, fontWeight: FontWeight.w800))),
-        TextButton.icon(onPressed: connected ? null : onAddSubscription, icon: const Icon(Icons.add_rounded), label: const LocalizedText('Add')),
+        TextButton.icon(onPressed: connected || subscriptionBusy ? null : onAddSubscription, icon: const Icon(Icons.add_rounded), label: const LocalizedText('Add')),
       ]),
       if (customSubscriptions.isEmpty)
         const Padding(
@@ -852,13 +1126,13 @@ class _ProfilesPage extends StatelessWidget {
             subtitle: const LocalizedText('Private URL stored on this device'),
             trailing: Wrap(spacing: 0, children: [
               IconButton(tooltip: context.tr('Refresh servers'), onPressed: connected || subscriptionBusy ? null : () => onRefreshSubscription(subscription), icon: const Icon(Icons.refresh_rounded)),
-              IconButton(tooltip: context.tr('Edit subscription'), onPressed: connected ? null : () => onEditSubscription(subscription), icon: const Icon(Icons.edit_outlined)),
-              IconButton(tooltip: context.tr('Remove subscription'), onPressed: connected ? null : () => onRemoveSubscription(subscription), icon: const Icon(Icons.delete_outline_rounded)),
+              IconButton(tooltip: context.tr('Edit subscription'), onPressed: connected || subscriptionBusy ? null : () => onEditSubscription(subscription), icon: const Icon(Icons.edit_outlined)),
+              IconButton(tooltip: context.tr('Remove subscription'), onPressed: connected || subscriptionBusy ? null : () => onRemoveSubscription(subscription), icon: const Icon(Icons.delete_outline_rounded)),
             ]),
           ),
         )),
       const SizedBox(height: 10),
-      FilledButton.tonalIcon(onPressed: connected ? null : onImport, icon: const Icon(Icons.add_link_rounded), label: const LocalizedText('Import one server link')),
+      FilledButton.tonalIcon(onPressed: connected || subscriptionBusy ? null : onImport, icon: const Icon(Icons.add_link_rounded), label: const LocalizedText('Import one server link')),
       const SizedBox(height: 14),
       if (profiles.isEmpty)
         _EmptyCard(dark: dark)

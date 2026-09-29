@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import 'package:flutter_vless/flutter_vless.dart';
 
 import 'profile_parser.dart';
@@ -17,16 +19,44 @@ class VpnProfile {
   String get protocol => summary.protocol;
   String get destination => summary.destination;
 
-  static VpnProfile fromShareLink(String input) {
-    // The local parser extracts display-safe endpoint metadata only.
-    final summary = ProfileParser.parse(input);
-    // flutter_vless turns the single share URI into an Xray config for native
-    // runtime use. The URI is not retained by this class.
-    final parsed = FlutterVless.parse(ProfileParser.normalizeScheme(input));
+  static VpnProfile fromShareLink(String input) =>
+      fromParsed(FlutterVless.parse(ProfileParser.normalizeScheme(input)));
+
+  /// Builds a runtime profile from the package's canonical parser output.
+  /// This accepts all import formats understood by flutter_vless, including
+  /// subscription JSON/YAML, while keeping the full config only in memory.
+  static VpnProfile fromParsed(FlutterVlessURL parsed) {
     final config = parsed.getFullConfiguration();
-    if (config.trim().isEmpty) {
-      throw const FormatException('The server link did not produce a usable config.');
+    final decoded = jsonDecode(config);
+    if (decoded is! Map<String, dynamic> ||
+        decoded['outbounds'] is! List ||
+        (decoded['outbounds'] as List).isEmpty) {
+      throw const FormatException('The imported profile has no usable outbound.');
     }
+
+    final rawProtocol =
+        (parsed.outbound1['protocol'] ?? '').toString().trim().toLowerCase();
+    final protocol = switch (rawProtocol) {
+      'vless' => 'VLESS',
+      'vmess' => 'VMess',
+      'shadowsocks' => 'Shadowsocks',
+      'trojan' => 'Trojan',
+      'hysteria2' => 'Hysteria2',
+      'wireguard' => 'WireGuard',
+      'socks' => 'SOCKS',
+      'http' => 'HTTP',
+      '' => 'Imported',
+      _ => rawProtocol.replaceAll(RegExp(r'[^a-z0-9_-]'), '').toUpperCase(),
+    };
+    final address = parsed.address.trim();
+    final port = parsed.port >= 1 && parsed.port <= 65535 ? parsed.port : 0;
+    final name = parsed.remark.trim();
+    final summary = ParsedProfile(
+      name: name.isEmpty ? '$protocol server' : name,
+      protocol: protocol,
+      host: address.isEmpty ? 'Imported configuration' : address,
+      port: port,
+    );
     return VpnProfile(summary: summary, config: config);
   }
 }

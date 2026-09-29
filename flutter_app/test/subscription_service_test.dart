@@ -34,6 +34,22 @@ unsupported://ignored
     });
   });
 
+  group('SubscriptionService profile parsing', () {
+    test('uses the maintained parser for a Base64 VLESS subscription payload', () {
+      const link =
+          'vless://11111111-1111-4111-8111-111111111111@node.example:443?type=tcp&security=none#Sample';
+      final profiles = SubscriptionService.parsePayload(
+        base64.encode(utf8.encode(link)),
+      );
+
+      expect(profiles, hasLength(1));
+      expect(profiles.single.protocol, 'VLESS');
+      expect(profiles.single.destination, 'node.example:443');
+      final config = jsonDecode(profiles.single.config) as Map<String, dynamic>;
+      expect(config['outbounds'], isNotEmpty);
+    });
+  });
+
   group('SubscriptionService URL validation', () {
     test('accepts direct HTTPS URLs and preserves provider query tokens', () {
       final uri = SubscriptionService.validateSubscriptionUrl(

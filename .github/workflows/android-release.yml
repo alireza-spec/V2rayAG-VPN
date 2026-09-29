@@ -60,6 +60,22 @@ jobs:
       - name: Generate Android project files
         run: flutter create --platforms=android --project-name=v2rayag_vpn .
 
+      - name: Set Android launcher and installer name
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          manifest = Path('android/app/src/main/AndroidManifest.xml')
+          xml = manifest.read_text()
+          updated, count = re.subn(r'android:label="[^"]*"', 'android:label="V2rayAG VPN"', xml, count=1)
+          if count == 0:
+              updated, count = re.subn(r'(<application\b)', r'\1 android:label="V2rayAG VPN"', xml, count=1)
+          if count != 1 or 'android:label="V2rayAG VPN"' not in updated:
+              raise SystemExit('Could not set the Android display name')
+          manifest.write_text(updated)
+          PY
+
       - name: Set minimum Android API for encrypted storage
         run: |
           python3 - <<'PY'
@@ -90,11 +106,17 @@ jobs:
 
           manifest = Path('android/app/src/main/AndroidManifest.xml')
           xml = manifest.read_text()
-          if 'android:allowBackup=' not in xml:
+          if 'android:allowBackup=' in xml:
+              xml, count = re.subn(r'android:allowBackup="[^"]*"', 'android:allowBackup="false"', xml, count=1)
+              if count != 1:
+                  raise SystemExit('Could not disable Android app backups')
+          else:
               xml, count = re.subn(r'(<application\b)', r'\1 android:allowBackup="false"', xml, count=1)
               if count != 1:
                   raise SystemExit('Could not configure Android app backup policy')
-              manifest.write_text(xml)
+          if 'android:allowBackup="false"' not in xml:
+              raise SystemExit('Android app backups must be disabled for Keystore-backed storage')
+          manifest.write_text(xml)
 
           candidates = [Path('android/app/build.gradle.kts'), Path('android/app/build.gradle')]
           gradle = next((path for path in candidates if path.exists()), None)

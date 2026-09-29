@@ -13,6 +13,10 @@ void main() {
   test('Persian translates UI text and preserves server data', () {
     const localizations = V2rayLocalizations(Locale('fa'));
     expect(localizations.text('Settings'), 'تنظیمات');
+    expect(
+      localizations.text('The tunnel disconnected unexpectedly. Check the server, profile, and network.'),
+      'تونل به‌طور غیرمنتظره قطع شد. سرور، نمایه و شبکه را بررسی کنید.',
+    );
     expect(localizations.text('Loaded 12 server profiles into app memory.'),
         '12 نمایهٔ سرور در حافظهٔ برنامه بارگذاری شد.');
     expect(
