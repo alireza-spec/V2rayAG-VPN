@@ -616,7 +616,7 @@ class _HomePage extends StatelessWidget {
             SizedBox(width: 9),
             Expanded(
               child: Text(
-                'Subscription URLs are encrypted in Android secure storage and never committed to GitHub. Imported server configs stay in app memory. The app never reads or displays your device IP.'
+                'Subscription URLs are encrypted in Android secure storage and never committed to GitHub. Imported server configs stay in app memory. The app never reads or displays your device IP.',
                 style: TextStyle(
                   fontSize: 11,
                   height: 1.45,
@@ -891,6 +891,7 @@ class _SettingsPage extends StatelessWidget {
 Future<String?> _readClipboard(BuildContext context) async {
   try {
     final data = await Clipboard.getData(Clipboard.kTextPlain);
+    if (!context.mounted) return null;
     final value = data?.text?.trim();
     if (value == null || value.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Clipboard is empty.')));
@@ -898,6 +899,7 @@ Future<String?> _readClipboard(BuildContext context) async {
     }
     return value;
   } on Object {
+    if (!context.mounted) return null;
     ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Could not read the clipboard.')));
     return null;
   }
