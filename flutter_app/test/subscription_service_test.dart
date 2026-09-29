@@ -81,8 +81,8 @@ hy2://secret@hy2.example:443#Hy2
 
     test('parses all server links from mixed clipboard text', () {
       const payload = 'These are the routes 🛡️ 42: '
-          'vless://11111111-1111-4111-8111-111111111111@one.example:443?type=tcp&security=none#One '
-          'vmess://eyJhZGQiOiJ0d28uZXhhbXBsZSIsInBvcnQiOiI4NDQzIiwiaWQiOiIxMTExMTExMS0xMTExLTQxMTEtODExMS0xMTExMTExMTExMTEifQ== '
+          'vless://11111111-1111-4111-8111-111111111111@one.example:443?type=tcp&security=none#One, '
+          'vless://22222222-2222-4222-8222-222222222222@two.example:8443?type=tcp&security=none#Two. '
           'end of copied message';
       final profiles = SubscriptionService.parsePayload(payload);
       expect(profiles, hasLength(2));
