@@ -2,28 +2,37 @@
 
 A privacy-focused VPN app project by **V2rayAG telegram channel and HashtagAlireza**. Official Telegram channel: [@V2rayAG](https://t.me/V2rayAG).
 
-## Current status
+## Project status
 
-This repository currently contains the source for the interactive **UI prototype**. It is not yet a functioning VPN client and does not create a VPN tunnel. The connect animation, latency, endpoint examples, and traffic values are illustrative. The example endpoint IPs are reserved documentation addresses, not live servers.
+The repository contains two distinct parts:
 
-The prototype deliberately does not read or display the device's real/public IP address. It shows only the selected destination endpoint and country. Do not enter a live subscription URL into the prototype; its import screen is only a visual flow and does not fetch or securely store subscriptions.
+- `prototype/` — the original interactive React/TypeScript UI concept. Its connection, traffic, and latency are illustrative; it does not route VPN traffic.
+- `flutter_app/` — the first Flutter client foundation, with a mobile UI, working appearance/accessibility preferences, and single-link metadata preview for VLESS, VMess, Shadowsocks, and Trojan. It does not yet contain a VPN tunnel or native Android/iOS project scaffolding.
 
-## Project contents
+The Flutter import preview keeps only a server name, protocol, host, and port in memory. It does not save credentials or fetch subscription URLs. Neither app reads or displays the device's public/source IP. The Flutter UI shows only the selected destination host and port; country stays unknown until trusted server metadata exists.
 
-- `prototype/` — current Tasklet-hosted React/TypeScript interface source: overview, location selector, subscription preview, settings, and responsive styling.
-- `prototype/components/` — reusable UI elements.
+## Run the Flutter foundation
 
-The prototype uses Tasklet's preview bridge for saving preferences. This source is not yet a standalone web app, Android APK, or iPhone app; it has no production tunnel implementation or release build configuration.
+Install Flutter 3.27+ plus the Android/iOS toolchains, then from `flutter_app/`:
 
-## Planned production work
+```sh
+flutter pub get
+flutter test
+flutter run
+```
 
-1. Convert the interface into a production project with Android and iPhone clients, plus a web companion for account and subscription management.
-2. Implement VLESS, VMess, Shadowsocks, and Trojan support using a maintained core, with platform-compliant VPN integrations (Android `VpnService` and Apple's Network Extension entitlement/signing).
-3. Import and refresh subscription profiles with secure on-device credential storage. Never commit subscription URLs, server credentials, private keys, signing material, or API secrets.
-4. Replace sample locations, pings, status, and traffic with live measurements from configured servers; ensure only destination endpoint IP and country are shown in the UI.
-5. Add tests, privacy/security review, and platform build and release workflows.
+Android, iOS, and web platform project folders are not generated yet. Web can be a management companion but cannot route device-wide VPN traffic.
 
-A web app can manage profiles and settings, but browsers cannot provide a full-device VPN tunnel.
+## Next steps
+
+1. Generate platform projects and establish clean Android/iOS debug builds.
+2. Select a maintained VPN core after reviewing license, protocol support, platform compatibility, and security maintenance.
+3. Design secure profile parsing and encrypted storage; implement subscription refresh with explicit user consent.
+4. Integrate Android `VpnService`, then Apple's Network Extension (requires entitlement and signing).
+5. Add verified destination country metadata and live ping only after the tunnel/server sources are defined.
+6. Test on devices and create release builds.
+
+Never commit live subscription URLs, server credentials, UUIDs, private keys, signing credentials, or API secrets.
 
 ## Credits
 
