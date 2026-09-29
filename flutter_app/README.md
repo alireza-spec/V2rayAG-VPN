@@ -10,12 +10,17 @@ A mobile VPN app by **V2rayAG telegram channel and HashtagAlireza**. Official ch
 - The app never obtains or displays the device/source/public IP. It shows the destination host and port from the imported profile. Country remains explicitly unknown until a trusted, privacy-reviewed metadata source is chosen.
 - Subscription import supports Base64 or newline-separated VLESS, VMess, Shadowsocks, and Trojan links from direct HTTPS URLs. Redirects are rejected to avoid forwarding credential-bearing URLs. User subscription URLs are stored only through Android Keystore-backed encrypted storage; imported server profiles remain in app memory.
 - The Connect screen has an **Exclusive V2rayAG Subs** one-tap path. No private provider URL is bundled: the user must enter or scan it once in the app. Other subscriptions can be added by name using clipboard paste or QR scanning, edited, refreshed, or removed.
+- One-tap Exclusive connection tries up to eight profiles sequentially only after the native engine specifically rejects a profile configuration. Permission and general platform-start failures stop the retry loop; manual server selection remains available.
 
 ## Platform status
 
-The Dart connect flow currently targets Android. It refuses to start another tunnel until the native engine explicitly reports `disconnected`, and it permits stopping a pending startup. If status remains unknown, connecting stays disabled rather than guessing whether a system VPN is already active. The native Android project folder has not been generated in this repository yet, so an APK has **not** been built or device-tested. The selected plugin's Android backend uses `VpnService`; current encrypted-storage dependency also requires Android minSdk 23 or newer. The CI build workflow raises the generated Android minSdk to 23.
+The Dart connect flow currently targets Android. It refuses to start another tunnel until the native engine explicitly reports `disconnected`, and it permits stopping a pending startup. If status remains unknown, connecting stays disabled rather than guessing whether a system VPN is already active. GitHub Actions generates the Android scaffold, analyzes/tests Dart, and packages APKs to verify compilation; no on-device end-to-end VPN connection has been verified. The plugin uses Android `VpnService`; encrypted storage requires minSdk 23 or newer, which CI configures. The plugin wrapper is pinned to 1.1.6 for reproducible parser/runtime behavior.
 
 iPhone is not configured yet. It requires an iOS Packet Tunnel / Network Extension target, App Group and shared Keychain setup, Apple Developer signing, and physical-device tests. The Dart engine intentionally reports Android-only until that integration is completed. Web is a management companion only and cannot tunnel all device traffic.
+
+## Release distribution and Play Protect
+
+CI does not publish installable APK artifacts. Version tags produce a signed AAB for Google Play only after the owner configures a unique permanent Android application ID and upload-key secrets. Follow [ANDROID_RELEASE.md](ANDROID_RELEASE.md). A sideloaded APK may still receive a Play Protect warning; no code or signing-key change can guarantee otherwise. Distribute through Google Play with Play App Signing for the supported no-sideload-warning path.
 
 ## Generate and run Android locally
 

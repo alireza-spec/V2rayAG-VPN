@@ -6,6 +6,11 @@ import 'package:flutter_vless/flutter_vless.dart';
 
 import 'vpn_profile.dart';
 
+/// Only profile-specific config rejection should trigger automatic fallback.
+bool shouldRetryConfigRejectedProfile(String? category) =>
+    category == 'InvalidConfiguration' ||
+    category == 'PlatformException:INVALID_CONFIG';
+
 /// Android VPN bridge. Other platforms deliberately remain disabled until their
 /// native projects and signing/entitlement setup are added and tested.
 class VpnEngine extends ChangeNotifier {
@@ -233,11 +238,12 @@ class VpnEngine extends ChangeNotifier {
       _connectWatchdog?.cancel();
       _connectWatchdog = null;
       _failureCategory = _categoryFor(error);
-      _phase = error is ArgumentError || error is FormatException
-          ? 'config-rejected'
-          : 'native-start-failed';
-      _message = error is ArgumentError || error is FormatException
-          ? 'This profile was rejected before the VPN started. Re-import a supported server configuration.'
+      final invalidConfig = error is ArgumentError ||
+          error is FormatException ||
+          (error is PlatformException && error.code == 'INVALID_CONFIG');
+      _phase = invalidConfig ? 'config-rejected' : 'native-start-failed';
+      _message = invalidConfig
+          ? 'The VPN engine rejected this server configuration before starting. Choose another profile or contact the provider.'
           : 'Could not start this route. Open connection details to inspect a safe diagnostic.';
       return false;
     } finally {

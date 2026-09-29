@@ -166,6 +166,7 @@ class V2rayLocalizations {
     'Copied to clipboard. Review and redact before sharing.': 'در حافظهٔ موقت کپی شد. پیش از اشتراک‌گذاری بررسی و اطلاعات حساس را حذف کنید.',
     'Could not start this route. Open connection details to inspect a safe diagnostic.': 'شروع این مسیر ممکن نشد. جزئیات اتصال را برای مشاهدهٔ گزارش امن بررسی کنید.',
     'This profile was rejected before the VPN started. Re-import a supported server configuration.': 'این نمایه پیش از شروع VPN رد شد. پیکربندی سرور پشتیبانی‌شده را دوباره وارد کنید.',
+    'The VPN engine rejected this server configuration before starting. Choose another profile or contact the provider.': 'موتور VPN پیکربندی این سرور را پیش از شروع نپذیرفت. نمایهٔ دیگری انتخاب کنید یا با ارائه‌دهنده تماس بگیرید.',
     'The tunnel is taking longer than expected. The app has not confirmed a working connection.': 'اتصال تونل بیش از حد انتظار طول کشیده است. برنامه هنوز اتصال فعال را تأیید نکرده است.',
     'The tunnel disconnected unexpectedly. Check the server, profile, and network.': 'تونل به‌طور غیرمنتظره قطع شد. سرور، نمایه و شبکه را بررسی کنید.',
     'Could not get a latency result. Try another profile or review connection details.': 'نتیجهٔ تأخیر دریافت نشد. نمایهٔ دیگری را امتحان کنید یا جزئیات اتصال را بررسی کنید.',
@@ -174,6 +175,10 @@ class V2rayLocalizations {
     'The subscription redirect could not be followed safely.': 'تغییرمسیر اشتراک را نمی‌توان با اطمینان دنبال کرد.',
     'No supported server profiles were found in this subscription response.': 'در پاسخ اشتراک هیچ نمایهٔ سرور پشتیبانی‌شده‌ای پیدا نشد.',
     'The imported profile has no usable outbound.': 'نمایهٔ واردشده مسیر خروجی قابل استفاده‌ای ندارد.',
+
+    'Exclusive subscription connected using a backup server.': 'اشتراک اختصاصی با یکی از سرورهای جایگزین وصل شد.',
+    'The native VPN engine rejected subscription profiles. Refresh the subscription or choose a different server.': 'موتور VPN دستگاه پیکربندی سرورهای اشتراک را نپذیرفت. اشتراک را تازه‌سازی کنید یا سرور دیگری انتخاب کنید.',
+    'No server in the subscription could be started. Check server access or choose another profile.': 'هیچ‌یک از سرورهای اشتراک شروع نشد. دسترسی به سرورها را بررسی کنید یا نمایهٔ دیگری انتخاب کنید.',
 
     // Connection/status and validation messages surfaced by the UI.
     'Import a server link first.': 'ابتدا یک پیوند سرور وارد کنید.',

@@ -12,10 +12,16 @@ dependencies:
     sdk: flutter
   flutter_localizations:
     sdk: flutter
-  flutter_vless: ^1.1.6
+  # Pin the VPN engine wrapper so a CI rebuild cannot silently change the
+  # parser/runtime integration between APKs.
+  flutter_vless: 1.1.6
   flutter_secure_storage: ^11.2.0
   shared_preferences: ^2.5.3
   mobile_scanner: ^7.4.2
+
+dependency_overrides:
+  flutter_vless_android: 1.1.6
+  flutter_vless_platform_interface: 1.1.2
 
 dev_dependencies:
   flutter_test:

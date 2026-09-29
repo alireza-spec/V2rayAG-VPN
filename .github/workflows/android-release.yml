@@ -1,4 +1,4 @@
-name: Android preview builds
+name: Android validation and Google Play bundle
 
 on:
   push:
@@ -76,6 +76,36 @@ jobs:
           manifest.write_text(updated)
           PY
 
+      - name: Set a Play-compatible Android package ID for tagged releases
+        env:
+          ANDROID_APPLICATION_ID: ${{ vars.ANDROID_APPLICATION_ID }}
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import os, re
+
+          app_id = os.environ.get('ANDROID_APPLICATION_ID', '').strip()
+          is_release = os.environ.get('GITHUB_REF', '').startswith('refs/tags/v')
+          if is_release and not app_id:
+              raise SystemExit('Set the unique ANDROID_APPLICATION_ID repository variable before making a Play bundle')
+          if not app_id:
+              print('No Play package ID configured; keeping generated placeholder for CI-only builds.')
+              raise SystemExit(0)
+          if not re.fullmatch(r'[A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z][A-Za-z0-9_]*)+', app_id):
+              raise SystemExit('ANDROID_APPLICATION_ID is not a valid reverse-domain Android ID')
+          gradle = Path('android/app/build.gradle.kts')
+          if not gradle.exists():
+              gradle = Path('android/app/build.gradle')
+          text = gradle.read_text()
+          if gradle.suffix == '.kts':
+              updated, count = re.subn(r'applicationId\s*=\s*"[^"]+"', f'applicationId = "{app_id}"', text, count=1)
+          else:
+              updated, count = re.subn(r'applicationId\s+"[^"]+"', f'applicationId "{app_id}"', text, count=1)
+          if count != 1:
+              raise SystemExit('Could not set the generated Android application ID')
+          gradle.write_text(updated)
+          PY
+
       - name: Set minimum Android API for encrypted storage
         run: |
           python3 - <<'PY'
@@ -147,8 +177,77 @@ jobs:
       - name: Run tests
         run: flutter test --no-pub
 
+      - name: Prepare the stable Google Play upload key
+        if: startsWith(github.ref, 'refs/tags/v') && matrix.name == 'universal'
+        env:
+          ANDROID_UPLOAD_KEYSTORE_BASE64: ${{ secrets.ANDROID_UPLOAD_KEYSTORE_BASE64 }}
+          ANDROID_UPLOAD_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_UPLOAD_KEYSTORE_PASSWORD }}
+          ANDROID_UPLOAD_KEY_ALIAS: ${{ secrets.ANDROID_UPLOAD_KEY_ALIAS }}
+          ANDROID_UPLOAD_KEY_PASSWORD: ${{ secrets.ANDROID_UPLOAD_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          for name in ANDROID_UPLOAD_KEYSTORE_BASE64 ANDROID_UPLOAD_KEYSTORE_PASSWORD ANDROID_UPLOAD_KEY_ALIAS ANDROID_UPLOAD_KEY_PASSWORD; do
+            if [[ -z "${!name}" ]]; then
+              echo "Missing GitHub Actions secret: $name" >&2
+              exit 1
+            fi
+          done
+          mkdir -p android/app
+          printf '%s' "$ANDROID_UPLOAD_KEYSTORE_BASE64" | base64 --decode > android/app/upload-keystore.jks
+          chmod 600 android/app/upload-keystore.jks
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          gradle = Path('android/app/build.gradle.kts')
+          if not gradle.exists():
+              raise SystemExit('Expected the generated Kotlin Gradle file for signed Play builds')
+          text = gradle.read_text()
+          if 'ANDROID_UPLOAD_KEYSTORE_PATH' in text:
+              raise SystemExit('Signing setup was already applied; refusing duplicate Gradle edits')
+          declarations = '''val uploadStorePath = System.getenv("ANDROID_UPLOAD_KEYSTORE_PATH")
+          val uploadStorePassword = System.getenv("ANDROID_UPLOAD_KEYSTORE_PASSWORD")
+          val uploadKeyAlias = System.getenv("ANDROID_UPLOAD_KEY_ALIAS")
+          val uploadKeyPassword = System.getenv("ANDROID_UPLOAD_KEY_PASSWORD")
+          val hasUploadSigning = listOf(uploadStorePath, uploadStorePassword, uploadKeyAlias, uploadKeyPassword).all { !it.isNullOrBlank() }
+
+          '''
+          if not re.search(r'\bandroid\s*\{', text):
+              raise SystemExit('Could not locate Android Gradle configuration')
+          text = re.sub(r'\bandroid\s*\{', declarations + 'android {', text, count=1)
+          signing = '''android {
+              signingConfigs {
+                  if (hasUploadSigning) {
+                      create("playUpload") {
+                          storeFile = file(uploadStorePath!!)
+                          storePassword = uploadStorePassword
+                          keyAlias = uploadKeyAlias
+                          keyPassword = uploadKeyPassword
+                      }
+                  }
+              }
+          '''
+          text, count = re.subn(r'\bandroid\s*\{', signing, text, count=1)
+          if count != 1:
+              raise SystemExit('Could not configure the Play upload signing key')
+          debug, count = re.subn(
+              r'signingConfig\s*=\s*signingConfigs\.getByName\("debug"\)',
+              'signingConfig = signingConfigs.getByName("playUpload")',
+              text,
+              count=1,
+          )
+          if count != 1:
+              raise SystemExit('Could not attach the stable key to the release build type')
+          gradle.write_text(debug)
+          PY
+
       - name: Build APK
         shell: bash
+        env:
+          ANDROID_UPLOAD_KEYSTORE_PATH: ${{ github.workspace }}/flutter_app/android/app/upload-keystore.jks
+          ANDROID_UPLOAD_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_UPLOAD_KEYSTORE_PASSWORD }}
+          ANDROID_UPLOAD_KEY_ALIAS: ${{ secrets.ANDROID_UPLOAD_KEY_ALIAS }}
+          ANDROID_UPLOAD_KEY_PASSWORD: ${{ secrets.ANDROID_UPLOAD_KEY_PASSWORD }}
         run: |
           if [[ -n "${{ matrix.target }}" ]]; then
             flutter build apk --release --target-platform "${{ matrix.target }}"
@@ -159,13 +258,28 @@ jobs:
           cp build/app/outputs/flutter-apk/app-release.apk \
             "$RUNNER_TEMP/v2rayag-apk/V2rayAG-${{ matrix.name }}.apk"
 
-      - name: Upload APK artifact
+      - name: Build signed Google Play bundle
+        if: startsWith(github.ref, 'refs/tags/v') && matrix.name == 'universal'
+        env:
+          ANDROID_UPLOAD_KEYSTORE_PATH: ${{ github.workspace }}/flutter_app/android/app/upload-keystore.jks
+          ANDROID_UPLOAD_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_UPLOAD_KEYSTORE_PASSWORD }}
+          ANDROID_UPLOAD_KEY_ALIAS: ${{ secrets.ANDROID_UPLOAD_KEY_ALIAS }}
+          ANDROID_UPLOAD_KEY_PASSWORD: ${{ secrets.ANDROID_UPLOAD_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          flutter build appbundle --release
+          mkdir -p "$RUNNER_TEMP/v2rayag-play"
+          cp build/app/outputs/bundle/release/app-release.aab \
+            "$RUNNER_TEMP/v2rayag-play/V2rayAG-VPN.aab"
+
+      - name: Upload signed Play bundle
+        if: startsWith(github.ref, 'refs/tags/v') && matrix.name == 'universal'
         uses: actions/upload-artifact@v4
         with:
-          name: android-${{ matrix.name }}
-          path: ${{ runner.temp }}/v2rayag-apk/V2rayAG-${{ matrix.name }}.apk
+          name: android-play-bundle
+          path: ${{ runner.temp }}/v2rayag-play/V2rayAG-VPN.aab
           if-no-files-found: error
-          retention-days: 14
+          retention-days: 30
 
   draft-release:
     name: Create draft Android release
@@ -175,32 +289,29 @@ jobs:
     permissions:
       contents: write
     steps:
-      - name: Download APK artifacts
+      - name: Download signed Play bundle
         uses: actions/download-artifact@v4
         with:
           path: dist
           merge-multiple: true
 
-      - name: Create draft release with APKs
+      - name: Create draft release with signed Play bundle
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           cat > release-notes.md <<'EOF'
-          ## Android preview build
+          ## Android Play Store candidate
 
-          These APKs are CI preview builds for device testing, not a Play Store release.
-          They are not signed with a production release key. Do not use them for sensitive
-          traffic until the Android tunnel has been tested on real devices and the release
-          signing and bundled-runtime notices have been reviewed.
+          This draft contains a signed Android App Bundle (AAB) for upload to Google Play
+          Console. Do not distribute an APK from GitHub if the goal is to avoid sideloading
+          warnings: publish through Google Play, which signs the delivered APKs with Play
+          App Signing. An upload-key signature alone cannot guarantee Play Protect will
+          approve an APK installed outside the Play Store.
 
-          - `V2rayAG-arm64-v8a.apk`: 64-bit ARM Android devices
-          - `V2rayAG-armeabi-v7a.apk`: 32-bit ARM Android devices
-          - `V2rayAG-universal.apk`: combined Flutter Android target architectures
-
-          The app does not read or display the device's public/source IP. Use only test
-          server profiles you control; never commit subscription URLs or server credentials.
+          The app still requires real-device VPN testing with valid provider profiles.
+          Never commit subscription URLs, server credentials, or signing keys.
           EOF
-          gh release create "$GITHUB_REF_NAME" dist/*.apk \
+          gh release create "$GITHUB_REF_NAME" dist/*.aab \
             --draft \
-            --title "$GITHUB_REF_NAME — Android preview" \
+            --title "$GITHUB_REF_NAME — Google Play candidate" \
             --notes-file release-notes.md

@@ -511,12 +511,45 @@ class _VpnShellState extends State<VpnShell> {
           _showMessage(_engine.message ?? 'Servers loaded; Android VPN is still preparing. Tap the power button when it is ready.');
           return;
         }
-        final started = await _engine.connect(profiles.first);
-        if (mounted && !started) {
-          _showMessage(_engine.message ?? 'Android tunnel was not ready to start. Try again after status is available.');
-        } else if (mounted && _engine.message != null) {
-          _showMessage(_engine.message!);
+
+        // Provider subscriptions can contain expired or Xray-incompatible nodes.
+        // Try profiles one at a time; never start concurrent native sessions.
+        // Bound the automatic attempts so a very large subscription cannot
+        // trap the user in a long sequence. Manual selection remains available.
+        final attemptCount = profiles.length < 8 ? profiles.length : 8;
+        var rejectedConfiguration = false;
+        for (var index = 0; index < attemptCount; index++) {
+          if (!mounted) return;
+          setState(() => _selectedIndex = index);
+          final started = await _engine.connect(profiles[index]);
+          if (!mounted) return;
+          if (started) {
+            if (index > 0) {
+              _showMessage('Exclusive subscription connected using a backup server.');
+            } else if (_engine.message != null) {
+              _showMessage(_engine.message!);
+            }
+            return;
+          }
+
+          final failure = _engine.failureCategory;
+          if (_engine.connected || _engine.connecting || _engine.disconnecting) {
+            break;
+          }
+          if (failure == 'VpnPermissionDenied') break;
+          // Only try another node for a profile-specific rejection. Other
+          // native startup failures usually need OS/app repair, not rotation.
+          if (shouldRetryConfigRejectedProfile(failure)) {
+            rejectedConfiguration = true;
+          } else {
+            break;
+          }
         }
+
+        if (!mounted) return;
+        _showMessage(rejectedConfiguration
+            ? 'The native VPN engine rejected subscription profiles. Refresh the subscription or choose a different server.'
+            : 'No server in the subscription could be started. Check server access or choose another profile.');
       } else {
         _showMessage('Loaded ${profiles.length} server profiles into app memory.');
       }

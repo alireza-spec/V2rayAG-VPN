@@ -1,6 +1,5 @@
-import 'dart:convert';
-
 import 'package:flutter_vless/flutter_vless.dart';
+import 'package:flutter_vless/url/xray_config_validator.dart';
 
 import 'profile_parser.dart';
 
@@ -27,7 +26,7 @@ class VpnProfile {
   /// subscription JSON/YAML, while keeping the full config only in memory.
   static VpnProfile fromParsed(FlutterVlessURL parsed) {
     final config = parsed.getFullConfiguration();
-    final decoded = jsonDecode(config);
+    final decoded = const XrayConfigValidator().validateJsonString(config);
     if (decoded is! Map<String, dynamic> ||
         decoded['outbounds'] is! List ||
         (decoded['outbounds'] as List).isEmpty) {

@@ -1,6 +1,7 @@
 import 'dart:convert';
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:flutter_vless/url/xray_config_validator.dart';
 import 'package:v2rayag_vpn/subscription_service.dart';
 
 void main() {
@@ -47,6 +48,25 @@ unsupported://ignored
       expect(profiles.single.destination, 'node.example:443');
       final config = jsonDecode(profiles.single.config) as Map<String, dynamic>;
       expect(config['outbounds'], isNotEmpty);
+    });
+
+    test('preserves host and path for a VLESS WebSocket profile', () {
+      const link =
+          'vless://11111111-1111-4111-8111-111111111111@edge.example:80?encryption=none&host=ws.example.net&path=%2F&security=none&type=ws#WebSocket';
+      final profiles = SubscriptionService.parsePayload(link);
+
+      expect(profiles, hasLength(1));
+      final config = const XrayConfigValidator()
+          .validateJsonString(profiles.single.config);
+      final outbound = (config['outbounds'] as List)
+          .cast<Map<String, dynamic>>()
+          .firstWhere((item) => item['protocol'] == 'vless');
+      final stream = outbound['streamSettings'] as Map<String, dynamic>;
+      expect(stream['network'], 'ws');
+      final websocket = stream['wsSettings'] as Map<String, dynamic>;
+      expect(websocket['path'], '/');
+      final headers = websocket['headers'] as Map<String, dynamic>;
+      expect(headers['Host'], 'ws.example.net');
     });
   });
 
