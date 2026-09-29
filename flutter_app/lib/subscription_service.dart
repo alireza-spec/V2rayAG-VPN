@@ -204,21 +204,22 @@ class SubscriptionService {
 }
 
 class SubscriptionPayloadParser {
-  static const _schemes = [
-    'vless://',
-    'vmess://',
-    'ss://',
-    'trojan://',
-    'socks://',
-    'hysteria2://',
-    'hy2://',
-  ];
+  static final _schemePattern = RegExp(
+    r'(?:vless|vmess|ss|trojan|socks|hysteria2|hy2)://',
+    caseSensitive: false,
+  );
+  static final _trailingPunctuation = RegExp(r'[.,;!?)\]}>，。；！？、]+$');
 
-  /// Supports plain newline-separated share links and Base64-encoded provider
-  /// responses. Lines containing unsupported schemes are ignored.
+  /// Finds supported share links anywhere in pasted text, including messages
+  /// with prose, emoji, bullets, or several links on one line. It only returns
+  /// recognized URI schemes; unrelated text and ordinary web links are ignored.
+  /// Also supports provider responses encoded as Base64.
   static List<String> extractShareLinks(String payload) {
-    final direct = _shareLines(payload);
-    if (direct.isNotEmpty) return direct;
+    if (payload.length > SubscriptionService.maxResponseBytes * 2) {
+      return const [];
+    }
+    final direct = _extractEmbeddedLinks(payload);
+    if (direct.isNotEmpty) return _deduplicate(direct);
 
     final compact = payload.trim().replaceAll(RegExp(r'\s+'), '');
     if (compact.isEmpty || compact.length > SubscriptionService.maxResponseBytes * 2) {
@@ -228,16 +229,47 @@ class SubscriptionPayloadParser {
       var normalized = compact.replaceAll('-', '+').replaceAll('_', '/');
       normalized += List<String>.filled((4 - normalized.length % 4) % 4, '=').join();
       final decoded = utf8.decode(base64.decode(normalized), allowMalformed: false);
-      return _shareLines(decoded);
+      return _deduplicate(_extractEmbeddedLinks(decoded));
     } on Object {
       return const [];
     }
   }
 
-  static List<String> _shareLines(String payload) => payload
-      .split(RegExp(r'[\r\n]+'))
-      .map((line) => line.trim())
-      .where((line) => line.isNotEmpty &&
-          _schemes.any((scheme) => line.toLowerCase().startsWith(scheme)))
-      .toList(growable: false);
+  static List<String> _extractEmbeddedLinks(String payload) {
+    final matches = _schemePattern.allMatches(payload).toList(growable: false);
+    if (matches.isEmpty) return const [];
+    final links = <String>[];
+    for (var index = 0;
+        index < matches.length && links.length < SubscriptionService.maxProfiles;
+        index++) {
+      final match = matches[index];
+      final start = match.start;
+      final nextScheme = index + 1 < matches.length
+          ? matches[index + 1].start
+          : payload.length;
+      var end = match.end;
+      const maxLinkLength = 16384;
+      while (end < payload.length &&
+          end - start < maxLinkLength &&
+          end < nextScheme &&
+          payload[end].trim().isNotEmpty) {
+        end++;
+      }
+      if (end - start >= maxLinkLength &&
+          end < payload.length &&
+          end < nextScheme &&
+          payload[end].trim().isNotEmpty) {
+        continue; // Ignore implausibly long/malformed tokens rather than truncate.
+      }
+      var candidate = payload.substring(start, end).trim();
+      candidate = candidate.replaceFirst(_trailingPunctuation, '');
+      if (candidate.length > match.end - match.start) links.add(candidate);
+    }
+    return links;
+  }
+
+  static List<String> _deduplicate(List<String> links) {
+    final seen = <String>{};
+    return links.where((link) => seen.add(link)).toList(growable: false);
+  }
 }

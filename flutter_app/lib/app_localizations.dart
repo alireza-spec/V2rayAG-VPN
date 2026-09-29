@@ -33,10 +33,19 @@ class V2rayLocalizations {
   String _translateDynamic(String source) {
     // Preserve dynamic server data and protocol names while translating the
     // surrounding fixed UI copy.
-    final loaded = RegExp(r'^Loaded (\d+) server profiles into app memory\.$')
-        .firstMatch(source);
+    final loaded = RegExp(
+      r'^Loaded (\d+) server profiles into app memory(?:\. Select a profile before connecting)?\.$',
+    ).firstMatch(source);
     if (loaded != null) {
-      return '${loaded.group(1)} نمایهٔ سرور در حافظهٔ برنامه بارگذاری شد.';
+      final selectionHint = source.contains('Select a profile before connecting')
+          ? ' یک نمایه را برای اتصال انتخاب کنید.'
+          : '';
+      return '${loaded.group(1)} نمایهٔ سرور در حافظهٔ برنامه بارگذاری شد.$selectionHint';
+    }
+    final added = RegExp(r'^Added (\d+) server profiles to this session\.$')
+        .firstMatch(source);
+    if (added != null) {
+      return '${added.group(1)} نمایهٔ سرور به این نشست افزوده شد.';
     }
     final measured = RegExp(r'^Measured route latency: (\d+) ms$')
         .firstMatch(source);
@@ -120,6 +129,16 @@ class V2rayLocalizations {
     'Edit subscription': 'ویرایش اشتراک',
     'Remove subscription': 'حذف اشتراک',
     'Import one server link': 'وارد کردن یک پیوند سرور',
+    'Import server links': 'وارد کردن پیوندهای سرور',
+    'Paste copied text with one or more VLESS, VMess, Shadowsocks, or Trojan links. Other text is ignored.': 'متن کپی‌شده شامل یک یا چند پیوند VLESS، VMess، Shadowsocks یا Trojan را جای‌گذاری کنید. متن‌های دیگر نادیده گرفته می‌شوند.',
+    'Paste one or more server links or a copied message': 'یک یا چند پیوند سرور یا پیام کپی‌شده را جای‌گذاری کنید',
+    'Only supported server links are imported. Extra text is ignored; imported configurations stay in app memory for this session. Use Add subscription for a provider URL.': 'فقط پیوندهای پشتیبانی‌شده وارد می‌شوند و متن اضافه نادیده گرفته می‌شود؛ پیکربندی‌ها در این نشست فقط در حافظهٔ برنامه می‌مانند. برای نشانی ارائه‌دهنده از «افزودن اشتراک» استفاده کنید.',
+    'Add server links to this session': 'افزودن پیوندهای سرور به این نشست',
+    'Paste one or more server links.': 'یک یا چند پیوند سرور را جای‌گذاری کنید.',
+    'That looks like a subscription URL. Use Add subscription instead.': 'این نشانی احتمالاً اشتراک است؛ به‌جای آن «افزودن اشتراک» را انتخاب کنید.',
+    'No supported server links were found in the pasted text.': 'هیچ پیوند سرور پشتیبانی‌شده‌ای در متن جای‌گذاری‌شده پیدا نشد.',
+    'The copied text could not be parsed. Check the links and try again.': 'متن کپی‌شده تجزیه نشد. پیوندها را بررسی و دوباره تلاش کنید.',
+    'These server links are already in the list.': 'این پیوندهای سرور از قبل در فهرست هستند.',
     'Remove profile': 'حذف نمایه',
     'Profile configs exist only in app memory during this session. Do not share screenshots or logs that reveal a server address.': 'پیکربندی نمایه‌ها فقط در حافظهٔ برنامه و در طول این نشست نگهداری می‌شود. تصویر صفحه یا گزارش‌هایی را که نشانی سرور را آشکار می‌کنند به‌اشتراک نگذارید.',
     'Your server list is empty': 'فهرست سرورهای شما خالی است',
@@ -242,7 +261,6 @@ class V2rayLocalizations {
     'Android VPN engine could not initialize. Restart the app and try again.': 'موتور VPN در Android راه‌اندازی نشد. برنامه را دوباره باز کنید و تلاش کنید.',
     'Android VPN engine could not initialize. Open connection details for a diagnostic.': 'موتور VPN در Android راه‌اندازی نشد. برای دیدن گزارش، جزئیات اتصال را باز کنید.',
     'That is a subscription URL, not a single server link. Open Servers and choose Add subscription.': 'این نشانی اشتراک است، نه پیوند یک سرور. به بخش سرورها بروید و «افزودن اشتراک» را انتخاب کنید.',
-
     // Safe parser/fetch validation errors. Inputs and credentials are never echoed.
     'Enter a direct HTTPS subscription URL (without embedded username/password or a fragment).': 'یک نشانی مستقیم HTTPS وارد کنید (بدون نام کاربری/گذرواژهٔ درون نشانی یا بخش fragment).',
     'Enter a valid direct HTTPS subscription URL.': 'یک نشانی معتبر مستقیم برای اشتراک با HTTPS وارد کنید.',

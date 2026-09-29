@@ -210,8 +210,6 @@ class _VpnShellState extends State<VpnShell> {
   final Completer<void> _routingPreferencesReady = Completer<void>();
   List<SavedSubscription> _savedSubscriptions = [];
   bool _subscriptionBusy = false;
-  bool _autoConnectActive = false;
-  bool _cancelAutoConnect = false;
   int? _selectedIndex;
   final Map<int, int> _profilePings = {};
   final Set<int> _probingProfiles = {};
@@ -220,7 +218,9 @@ class _VpnShellState extends State<VpnShell> {
       MethodChannel('v2rayag/app_picker');
   static const _excludedPackagesKey = 'excluded_packages_v1';
 
-  static const _exclusiveId = 'exclusive-v2rayag';
+  // Remove a legacy device-only Exclusive entry during migration. The app no
+  // longer accepts or exposes centrally managed credentials locally.
+  static const _retiredExclusiveId = 'exclusive-v2rayag';
 
   @override
   void initState() {
@@ -234,7 +234,19 @@ class _VpnShellState extends State<VpnShell> {
   Future<void> _restoreSubscriptions() async {
     try {
       final saved = await _subscriptionRepository.readAll();
-      if (mounted) setState(() => _savedSubscriptions = saved);
+      final personal = saved
+          .where((item) => item.id != _retiredExclusiveId)
+          .toList(growable: true);
+      if (personal.length != saved.length) {
+        // Best-effort removal of the old private Exclusive URL from secure
+        // storage; it is never copied into the new personal list.
+        try {
+          await _subscriptionRepository.saveAll(personal);
+        } on Object {
+          // Keep the legacy entry hidden even if secure storage is unavailable.
+        }
+      }
+      if (mounted) setState(() => _savedSubscriptions = personal);
     } on Object {
       if (mounted) _showMessage('Secure subscription storage is unavailable on this device.');
     } finally {
@@ -384,23 +396,21 @@ class _VpnShellState extends State<VpnShell> {
   }
 
   Future<void> _toggleConnection() async {
-    final isActive = _engine.connected || _engine.connecting || _engine.disconnecting;
-    final canCancelAutoConnect = _subscriptionBusy && _autoConnectActive && isActive;
-    if (_subscriptionBusy && !canCancelAutoConnect) {
+    if (_subscriptionBusy) {
       _showMessage('Wait for the subscription operation to finish.');
       return;
     }
+    final isActive = _engine.connected || _engine.connecting || _engine.disconnecting;
     final profile = _selectedIndex == null ? null : _profiles[_selectedIndex!];
-    if (profile == null) {
+    if (!isActive && profile == null) {
       _showMessage('Import a server link first.');
       return;
     }
     if (isActive) {
-      if (canCancelAutoConnect) setState(() => _cancelAutoConnect = true);
       await _engine.disconnect();
     } else {
       await _engine.connect(
-        profile,
+        profile!,
         blockedApps: _excludedPackages.toList(growable: false),
       );
     }
@@ -506,36 +516,46 @@ class _VpnShellState extends State<VpnShell> {
       _showMessage('Disconnect before importing another server.');
       return;
     }
-    final profile = await showModalBottomSheet<VpnProfile>(
+    final imported = await showModalBottomSheet<List<VpnProfile>>(
       context: context,
       isScrollControlled: true,
       backgroundColor: Colors.transparent,
       builder: (_) => const _ImportSheet(),
     );
-    if (profile == null || !mounted) return;
+    if (imported == null || imported.isEmpty || !mounted) return;
     if (_engine.connected || _engine.connecting || _engine.disconnecting) {
       _showMessage('Disconnect before importing another active route.');
       return;
     }
+    final added = <VpnProfile>[];
+    for (final profile in imported) {
+      final alreadyExists = _profiles.any((existing) => existing.config == profile.config) ||
+          added.any((existing) => existing.config == profile.config);
+      if (!alreadyExists) added.add(profile);
+    }
+    if (added.isEmpty) {
+      _showMessage('These server links are already in the list.');
+      return;
+    }
     setState(() {
-      _profiles.add(profile);
-      _selectedIndex = _profiles.length - 1;
+      final firstNewIndex = _profiles.length;
+      _profiles.addAll(added);
+      _selectedIndex = firstNewIndex;
       _tab = 1;
     });
-    _showMessage('Server profile added to this session memory.');
+    _showMessage('Added ${added.length} server profiles to this session.');
   }
 
-  Future<SavedSubscription?> _editSubscription({SavedSubscription? existing, required bool exclusive}) {
-    final id = existing?.id ?? (exclusive ? _exclusiveId : 'custom-${DateTime.now().microsecondsSinceEpoch}');
+  Future<SavedSubscription?> _editSubscription({SavedSubscription? existing}) {
+    final id = existing?.id ?? 'custom-${DateTime.now().microsecondsSinceEpoch}';
     return showModalBottomSheet<SavedSubscription>(
       context: context,
       isScrollControlled: true,
       backgroundColor: Colors.transparent,
       builder: (_) => _SubscriptionEditorSheet(
         id: id,
-        initialName: exclusive ? 'Exclusive V2rayAG Subs' : (existing?.name ?? ''),
+        initialName: existing?.name ?? '',
         initialUrl: existing?.url ?? '',
-        fixedName: exclusive,
       ),
     );
   }
@@ -589,7 +609,7 @@ class _VpnShellState extends State<VpnShell> {
       _showMessage('Disconnect before refreshing subscriptions.');
       return;
     }
-    final subscription = await _editSubscription(exclusive: false);
+    final subscription = await _editSubscription();
     if (subscription == null || !mounted) return;
     final choice = await _saveSubscription(subscription);
     if (!mounted || choice == _SubscriptionSaveChoice.cancelled) return;
@@ -604,10 +624,7 @@ class _VpnShellState extends State<VpnShell> {
       _showMessage('Disconnect before changing subscriptions.');
       return;
     }
-    final updated = await _editSubscription(
-      existing: existing,
-      exclusive: existing.id == _exclusiveId,
-    );
+    final updated = await _editSubscription(existing: existing);
     if (updated == null || !mounted) return;
     final choice = await _saveSubscription(updated);
     if (!mounted || choice == _SubscriptionSaveChoice.cancelled) return;
@@ -628,29 +645,7 @@ class _VpnShellState extends State<VpnShell> {
     }
   }
 
-  Future<void> _connectExclusiveSubscription() async {
-    if (_subscriptionBusy) return;
-    await _subscriptionsReady.future;
-    if (!mounted) return;
-    if (_engine.connected || _engine.connecting || _engine.disconnecting) {
-      _showMessage('Disconnect the current route with the power button before switching subscriptions.');
-      return;
-    }
-    final existing = _savedSubscriptions.where((item) => item.id == _exclusiveId).firstOrNull;
-    SavedSubscription? subscription = existing;
-    if (subscription == null) {
-      subscription = await _editSubscription(exclusive: true);
-      if (subscription == null || !mounted) return;
-      final choice = await _saveSubscription(subscription);
-      if (!mounted || choice == _SubscriptionSaveChoice.cancelled) return;
-    }
-    await _refreshSubscription(subscription, connectFirst: true);
-  }
-
-  Future<void> _refreshSubscription(
-    SavedSubscription subscription, {
-    bool connectFirst = false,
-  }) async {
+  Future<void> _refreshSubscription(SavedSubscription subscription) async {
     if (_subscriptionBusy) return;
     if (_engine.connected || _engine.connecting || _engine.disconnecting) {
       _showMessage('Disconnect before refreshing subscriptions.');
@@ -661,8 +656,8 @@ class _VpnShellState extends State<VpnShell> {
     try {
       final profiles = await SubscriptionService.fetchProfiles(subscription.url);
       if (!mounted) return;
-      // Do not replace the selected profile list if Android started or restored
-      // a tunnel while the network fetch was in flight.
+      // Do not replace profiles if Android started or restored a tunnel while
+      // the network fetch was in flight.
       if (_engine.connected || _engine.connecting || _engine.disconnecting) {
         _showMessage('Disconnect before refreshing subscriptions.');
         return;
@@ -674,86 +669,16 @@ class _VpnShellState extends State<VpnShell> {
         _profilePings.clear();
         _probingProfiles.clear();
         _selectedIndex = 0;
-        _tab = connectFirst ? 0 : 1;
-        _autoConnectActive = connectFirst;
-        _cancelAutoConnect = false;
+        _tab = 1;
       });
-      if (connectFirst) {
-        if (!_engine.canStart) {
-          _showMessage(_engine.message ?? 'Servers loaded; Android VPN is still preparing. Tap the power button when it is ready.');
-          return;
-        }
-
-        // Provider subscriptions can contain expired or Xray-incompatible nodes.
-        // Try profiles one at a time; never start concurrent native sessions.
-        // Bound the automatic attempts so a very large subscription cannot
-        // trap the user in a long sequence. Manual selection remains available.
-        final attemptCount = profiles.length < 8 ? profiles.length : 8;
-        var rejectedConfiguration = false;
-        for (var index = 0; index < attemptCount; index++) {
-          if (!mounted || _cancelAutoConnect) break;
-          setState(() => _selectedIndex = index);
-          final started = await _engine.connect(
-            profiles[index],
-            blockedApps: _excludedPackages.toList(growable: false),
-          );
-          if (!mounted) return;
-          if (_cancelAutoConnect) break;
-          if (started) {
-            if (index > 0) {
-              _showMessage('Exclusive subscription connected using a backup server.');
-            } else if (_engine.message != null) {
-              _showMessage(_engine.message!);
-            }
-            return;
-          }
-
-          final failure = _engine.failureCategory;
-          if (_engine.connected || _engine.connecting || _engine.disconnecting) {
-            break;
-          }
-          if (failure == 'VpnPermissionDenied') break;
-          // Retry only when this attempt is known to have been rejected or
-          // safely stopped after a route-specific timeout/disconnect. Never
-          // rotate while a native tunnel may still be active.
-          if (shouldRetrySubscriptionProfile(failure)) {
-            if (failure == 'InvalidConfiguration' ||
-                failure == 'PlatformException:INVALID_CONFIG') {
-              rejectedConfiguration = true;
-            }
-          } else {
-            break;
-          }
-        }
-
-        if (!mounted) return;
-        if (_cancelAutoConnect) {
-          final stillActive =
-              _engine.connected || _engine.connecting || _engine.disconnecting;
-          _showMessage(stillActive
-              ? (_engine.message ?? 'Android has not confirmed disconnect yet. Retry disconnect before starting another route.')
-              : 'Automatic connection was cancelled.');
-          return;
-        }
-        _showMessage(rejectedConfiguration
-            ? 'The native VPN engine rejected subscription profiles. Refresh the subscription or choose a different server.'
-            : 'No server in the subscription could be started. Check server access or choose another profile.');
-      } else {
-        _showMessage('Loaded ${profiles.length} server profiles into app memory.');
-      }
+      _showMessage('Loaded ${profiles.length} server profiles into app memory. Select a profile before connecting.');
     } on FormatException catch (error) {
-      // These parser/fetch errors are fixed, credential-free messages; never
-      // surface the URL or raw HTTP/network exception in the UI.
+      // Show only fixed, credential-free parser/fetch messages.
       if (mounted) _showMessage(error.message);
     } on Object {
       if (mounted) _showMessage('Could not load this subscription. Check the secure URL and try again.');
     } finally {
-      if (mounted) {
-        setState(() {
-          _subscriptionBusy = false;
-          _autoConnectActive = false;
-        });
-      }
+      if (mounted) setState(() => _subscriptionBusy = false);
     }
   }
 
@@ -807,8 +732,6 @@ class _VpnShellState extends State<VpnShell> {
         onEditSubscription: _editSavedSubscription,
         onRemoveSubscription: _removeSubscription,
         onRefreshSubscription: _refreshSubscription,
-        onConnectExclusive: _connectExclusiveSubscription,
-        exclusiveId: _exclusiveId,
         subscriptionBusy: _subscriptionBusy,
       ),
       _SettingsPage(
@@ -1242,8 +1165,6 @@ class _ProfilesPage extends StatelessWidget {
     required this.onEditSubscription,
     required this.onRemoveSubscription,
     required this.onRefreshSubscription,
-    required this.onConnectExclusive,
-    required this.exclusiveId,
     required this.subscriptionBusy,
   });
 
@@ -1261,62 +1182,18 @@ class _ProfilesPage extends StatelessWidget {
   final VoidCallback onAddSubscription;
   final ValueChanged<SavedSubscription> onEditSubscription;
   final ValueChanged<SavedSubscription> onRemoveSubscription;
-  final Future<void> Function(SavedSubscription, {bool connectFirst}) onRefreshSubscription;
-  final VoidCallback onConnectExclusive;
-  final String exclusiveId;
+  final Future<void> Function(SavedSubscription) onRefreshSubscription;
   final bool subscriptionBusy;
 
   @override
   Widget build(BuildContext context) {
     final dark = Theme.of(context).brightness == Brightness.dark;
-    final exclusive = subscriptions.where((item) => item.id == exclusiveId).firstOrNull;
-    final customSubscriptions = subscriptions.where((item) => item.id != exclusiveId).toList();
+    final customSubscriptions = subscriptions;
     return ListView(padding: const EdgeInsets.fromLTRB(20, 18, 20, 28), children: [
       LocalizedText('Servers', style: Theme.of(context).textTheme.headlineMedium?.copyWith(fontWeight: FontWeight.w800)),
       const SizedBox(height: 6),
       const LocalizedText('Add your subscription, refresh servers, and choose a route.', style: TextStyle(color: _muted)),
       const SizedBox(height: 18),
-      Container(
-        padding: const EdgeInsets.all(16),
-        decoration: BoxDecoration(
-          gradient: LinearGradient(colors: dark
-              ? const [Color(0xFF17332D), Color(0xFF282239)]
-              : const [Color(0xFFE7F8F1), Color(0xFFF3EAFE)]),
-          borderRadius: BorderRadius.circular(22),
-          border: dark ? Border.all(color: Colors.white10) : null,
-        ),
-        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          Row(children: [
-            const Icon(Icons.bolt_rounded, color: Color(0xFF58D7B2)),
-            const SizedBox(width: 8),
-            Expanded(child: LocalizedText('Exclusive V2rayAG Subs', style: TextStyle(fontWeight: FontWeight.w800, color: dark ? Colors.white : _ink))),
-            const Icon(Icons.lock_outline_rounded, size: 18, color: _muted),
-          ]),
-          const SizedBox(height: 5),
-          LocalizedText(
-            exclusive == null ? 'Enter your private subscription URL once.' : 'Saved securely on this device.',
-            style: const TextStyle(fontSize: 12, color: _muted),
-          ),
-          const SizedBox(height: 12),
-          SizedBox(width: double.infinity, child: FilledButton.icon(
-            onPressed: subscriptionBusy ? null : onConnectExclusive,
-            icon: subscriptionBusy
-                ? const SizedBox(width: 17, height: 17, child: CircularProgressIndicator(strokeWidth: 2))
-                : const Icon(Icons.flash_on_rounded),
-            label: LocalizedText(subscriptionBusy ? 'Fetching servers…' : 'One-tap connect'),
-          )),
-          if (exclusive != null)
-            Align(
-              alignment: Alignment.centerRight,
-              child: TextButton.icon(
-                onPressed: connected || subscriptionBusy ? null : () => onEditSubscription(exclusive),
-                icon: const Icon(Icons.edit_outlined, size: 17),
-                label: const LocalizedText('Change URL'),
-              ),
-            ),
-        ]),
-      ),
-      const SizedBox(height: 16),
       Row(children: [
         const Expanded(child: LocalizedText('My subscriptions', style: TextStyle(fontSize: 17, fontWeight: FontWeight.w800))),
         TextButton.icon(onPressed: connected || subscriptionBusy ? null : onAddSubscription, icon: const Icon(Icons.add_rounded), label: const LocalizedText('Add')),
@@ -1342,7 +1219,7 @@ class _ProfilesPage extends StatelessWidget {
           ),
         )),
       const SizedBox(height: 10),
-      FilledButton.tonalIcon(onPressed: connected || subscriptionBusy ? null : onImport, icon: const Icon(Icons.add_link_rounded), label: const LocalizedText('Import one server link')),
+      FilledButton.tonalIcon(onPressed: connected || subscriptionBusy ? null : onImport, icon: const Icon(Icons.add_link_rounded), label: const LocalizedText('Import server links')),
       const SizedBox(height: 14),
       if (profiles.isEmpty)
         _EmptyCard(dark: dark)
@@ -1583,13 +1460,11 @@ class _SubscriptionEditorSheet extends StatefulWidget {
     required this.id,
     required this.initialName,
     required this.initialUrl,
-    required this.fixedName,
   });
 
   final String id;
   final String initialName;
   final String initialUrl;
-  final bool fixedName;
 
   @override
   State<_SubscriptionEditorSheet> createState() => _SubscriptionEditorSheetState();
@@ -1620,7 +1495,7 @@ class _SubscriptionEditorSheetState extends State<_SubscriptionEditorSheet> {
   }
 
   void _save() {
-    final name = widget.fixedName ? 'Exclusive V2rayAG Subs' : _nameController.text.trim();
+    final name = _nameController.text.trim();
     if (name.isEmpty) {
       setState(() => _error = 'Add a name for this subscription.');
       return;
@@ -1644,16 +1519,14 @@ class _SubscriptionEditorSheetState extends State<_SubscriptionEditorSheet> {
         child: SafeArea(top: false, child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
           Center(child: Container(width: 38, height: 4, decoration: BoxDecoration(color: Colors.grey.shade400, borderRadius: BorderRadius.circular(5)))),
           const SizedBox(height: 18),
-          LocalizedText(widget.fixedName ? 'Set up Exclusive V2rayAG Subs' : 'Add a subscription', style: const TextStyle(fontSize: 21, fontWeight: FontWeight.w800)),
+          const LocalizedText('Add a subscription', style: TextStyle(fontSize: 21, fontWeight: FontWeight.w800)),
           const SizedBox(height: 7),
           const LocalizedText('Paste or scan your provider’s HTTPS subscription URL. Your own URL is needed; none is bundled with this app.', style: TextStyle(fontSize: 12, color: _muted, height: 1.4)),
-          if (!widget.fixedName) ...[
-            const SizedBox(height: 14),
-            TextField(
-              controller: _nameController,
-              decoration: InputDecoration(labelText: context.tr('Name'), filled: true, fillColor: Theme.of(context).brightness == Brightness.dark ? const Color(0xFF101817) : const Color(0xFFF4F6F3), border: OutlineInputBorder(borderRadius: BorderRadius.circular(15), borderSide: BorderSide.none)),
-            ),
-          ],
+          const SizedBox(height: 14),
+          TextField(
+            controller: _nameController,
+            decoration: InputDecoration(labelText: context.tr('Name'), filled: true, fillColor: Theme.of(context).brightness == Brightness.dark ? const Color(0xFF101817) : const Color(0xFFF4F6F3), border: OutlineInputBorder(borderRadius: BorderRadius.circular(15), borderSide: BorderSide.none)),
+          ),
           const SizedBox(height: 12),
           TextField(
             controller: _urlController,
@@ -1715,19 +1588,27 @@ class _ImportSheetState extends State<_ImportSheet> {
 
   void _preview() {
     final input = _controller.text.trim();
-    final scheme = Uri.tryParse(input)?.scheme.toLowerCase();
-    if (scheme == 'http' || scheme == 'https') {
-      setState(() => _error = 'That is a subscription URL, not a single server link. Open Servers and choose Add subscription.');
+    if (input.isEmpty) {
+      setState(() => _error = 'Paste one or more server links.');
       return;
     }
     try {
-      final profile = VpnProfile.fromShareLink(input);
+      // parsePayload extracts supported links from copied chats/messages and
+      // ignores surrounding prose, emoji, punctuation, and unrelated URLs.
+      final profiles = SubscriptionService.parsePayload(input);
+      if (profiles.isEmpty) {
+        final containsWebUrl = RegExp(r'https?://', caseSensitive: false).hasMatch(input);
+        setState(() => _error = containsWebUrl
+            ? 'That looks like a subscription URL. Use Add subscription instead.'
+            : 'No supported server links were found in the pasted text.');
+        return;
+      }
       _controller.clear();
-      Navigator.of(context).pop(profile);
-    } on FormatException catch (error) {
-      setState(() => _error = error.message);
+      Navigator.of(context).pop(profiles);
+    } on FormatException {
+      setState(() => _error = 'No supported server links were found in the pasted text.');
     } catch (_) {
-      setState(() => _error = 'That link could not be parsed. Check the format and try again.');
+      setState(() => _error = 'The copied text could not be parsed. Check the links and try again.');
     }
   }
 
@@ -1742,19 +1623,19 @@ class _ImportSheetState extends State<_ImportSheet> {
         child: SafeArea(top: false, child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
           Center(child: Container(width: 38, height: 4, decoration: BoxDecoration(color: Colors.grey.shade400, borderRadius: BorderRadius.circular(5)))),
           const SizedBox(height: 18),
-          const LocalizedText('Import a server link', style: TextStyle(fontSize: 21, fontWeight: FontWeight.w800)),
+          const LocalizedText('Import server links', style: TextStyle(fontSize: 21, fontWeight: FontWeight.w800)),
           const SizedBox(height: 6),
-          const LocalizedText('One server link: VLESS, VMess, Shadowsocks, or Trojan.', style: TextStyle(fontSize: 12, color: _muted)),
+          const LocalizedText('Paste copied text with one or more VLESS, VMess, Shadowsocks, or Trojan links. Other text is ignored.', style: TextStyle(fontSize: 12, color: _muted)),
           const SizedBox(height: 14),
           TextField(
             controller: _controller,
             autofocus: true,
-            minLines: 2,
-            maxLines: 4,
+            minLines: 3,
+            maxLines: 8,
             autocorrect: false,
             enableSuggestions: false,
             decoration: InputDecoration(
-              hintText: context.tr('Paste one server share link'),
+              hintText: context.tr('Paste one or more server links or a copied message'),
               errorText: _error == null ? null : context.tr(_error!),
               filled: true,
               fillColor: Theme.of(context).brightness == Brightness.dark ? const Color(0xFF101817) : const Color(0xFFF4F6F3),
@@ -1768,9 +1649,9 @@ class _ImportSheetState extends State<_ImportSheet> {
             OutlinedButton.icon(onPressed: _scan, icon: const Icon(Icons.qr_code_scanner_rounded), label: const LocalizedText('Scan QR')),
           ]),
           const SizedBox(height: 6),
-          const LocalizedText('A single server link is held in app memory for this session only. Use Add subscription for a provider URL.', style: TextStyle(fontSize: 11, color: _muted, height: 1.4)),
+          const LocalizedText('Only supported server links are imported. Extra text is ignored; imported configurations stay in app memory for this session. Use Add subscription for a provider URL.', style: TextStyle(fontSize: 11, color: _muted, height: 1.4)),
           const SizedBox(height: 15),
-          SizedBox(width: double.infinity, child: FilledButton(onPressed: _preview, child: const LocalizedText('Add to this session'))),
+          SizedBox(width: double.infinity, child: FilledButton(onPressed: _preview, child: const LocalizedText('Add server links to this session'))),
         ])),
       ),
     );

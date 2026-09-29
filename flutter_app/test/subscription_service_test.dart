@@ -19,6 +19,23 @@ unsupported://ignored
       expect(links.last, startsWith('vmess://'));
     });
 
+    test('extracts multiple links embedded in prose, emoji, and inline text', () {
+      const payload = 'Copied routes ✅ number 7: '
+          'vless://11111111-1111-4111-8111-111111111111@one.example:443?type=tcp&security=none#First, '
+          'vmess://eyJhZGQiOiJ0d28uZXhhbXBsZSIsInBvcnQiOiI4NDQzIiwiaWQiOiJ4In0=.'
+          ' extra text https://ordinary.example/page';
+      final links = SubscriptionPayloadParser.extractShareLinks(payload);
+      expect(links, hasLength(2));
+      expect(links.first, startsWith('vless://'));
+      expect(links.last, startsWith('vmess://'));
+      expect(links.last, isNot(endsWith('.')));
+    });
+
+    test('deduplicates repeated links embedded in copied text', () {
+      const link = 'vless://11111111-1111-4111-8111-111111111111@node.example:443?type=tcp&security=none#A';
+      expect(SubscriptionPayloadParser.extractShareLinks('one $link two $link'), [link]);
+    });
+
     test('decodes a base64 encoded provider response', () {
       const contents = 'trojan://secret@node.example:443#Tokyo\nss://YWVzLTEyOC1nY206cGFzcw@ss.example:8443#West';
       final payload = base64.encode(utf8.encode(contents));
@@ -60,6 +77,16 @@ hy2://secret@hy2.example:443#Hy2
       expect(profiles.single.destination, 'node.example:443');
       final config = jsonDecode(profiles.single.config) as Map<String, dynamic>;
       expect(config['outbounds'], isNotEmpty);
+    });
+
+    test('parses all server links from mixed clipboard text', () {
+      const payload = 'These are the routes 🛡️ 42: '
+          'vless://11111111-1111-4111-8111-111111111111@one.example:443?type=tcp&security=none#One '
+          'vmess://eyJhZGQiOiJ0d28uZXhhbXBsZSIsInBvcnQiOiI4NDQzIiwiaWQiOiIxMTExMTExMS0xMTExLTQxMTEtODExMS0xMTExMTExMTExMTEifQ== '
+          'end of copied message';
+      final profiles = SubscriptionService.parsePayload(payload);
+      expect(profiles, hasLength(2));
+      expect(profiles.map((profile) => profile.destination), containsAll(['one.example:443', 'two.example:8443']));
     });
 
     test('keeps valid share links when another subscription line is malformed', () {
