@@ -60,6 +60,28 @@ jobs:
       - name: Generate Android project files
         run: flutter create --platforms=android --project-name=v2rayag_vpn .
 
+      - name: Set minimum Android API for encrypted storage
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          candidates = [Path('android/app/build.gradle.kts'), Path('android/app/build.gradle')]
+          changed = False
+          for path in candidates:
+              if not path.exists():
+                  continue
+              text = path.read_text()
+              if path.suffix == '.kts':
+                  updated = text.replace('minSdk = flutter.minSdkVersion', 'minSdk = maxOf(flutter.minSdkVersion, 23)')
+              else:
+                  updated = text.replace('minSdkVersion flutter.minSdkVersion', 'minSdkVersion 23')
+              if updated != text:
+                  path.write_text(updated)
+                  changed = True
+                  break
+          if not changed:
+              raise SystemExit('Could not set Android minSdk to 23 in generated project')
+          PY
+
       - name: Remove generated placeholder widget test
         run: rm -f test/widget_test.dart
 

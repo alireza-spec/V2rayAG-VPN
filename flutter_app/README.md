@@ -8,17 +8,18 @@ A mobile VPN app by **V2rayAG telegram channel and HashtagAlireza**. Official ch
 - Share-link parsing for VLESS, VMess, Shadowsocks, and Trojan uses the Xray-backed plugin.
 - Connection config is held in app memory and handed to the native engine only when connecting. The Flutter app does not write it to preferences or log it. Native runtime retention and diagnostic behavior have not yet been audited; do not commit live configs or share diagnostics/screenshots containing server details.
 - The app never obtains or displays the device/source/public IP. It shows the destination host and port from the imported profile. Country remains explicitly unknown until a trusted, privacy-reviewed metadata source is chosen.
-- Subscription URL fetching, persistent Flutter-side profile storage, and country geolocation are not enabled.
+- Subscription import supports Base64 or newline-separated VLESS, VMess, Shadowsocks, and Trojan links from direct HTTPS URLs. Redirects are rejected to avoid forwarding credential-bearing URLs. User subscription URLs are stored only through Android Keystore-backed encrypted storage; imported server profiles remain in app memory.
+- The Connect screen has an **Exclusive V2rayAG Subs** one-tap path. No private provider URL is bundled: the user must enter or scan it once in the app. Other subscriptions can be added by name using clipboard paste or QR scanning, edited, refreshed, or removed.
 
 ## Platform status
 
-The Dart connect flow currently targets Android. It refuses to start another tunnel until the native engine explicitly reports `disconnected`, and it permits stopping a pending startup. If status remains unknown, connecting stays disabled rather than guessing whether a system VPN is already active. The native Android project folder has not been generated in this repository yet, so an APK has **not** been built or device-tested. The selected plugin's Android backend uses `VpnService`; its docs require Android minSdk 23 or newer.
+The Dart connect flow currently targets Android. It refuses to start another tunnel until the native engine explicitly reports `disconnected`, and it permits stopping a pending startup. If status remains unknown, connecting stays disabled rather than guessing whether a system VPN is already active. The native Android project folder has not been generated in this repository yet, so an APK has **not** been built or device-tested. The selected plugin's Android backend uses `VpnService`; current encrypted-storage dependency also requires Android minSdk 23 or newer. The CI build workflow raises the generated Android minSdk to 23.
 
 iPhone is not configured yet. It requires an iOS Packet Tunnel / Network Extension target, App Group and shared Keychain setup, Apple Developer signing, and physical-device tests. The Dart engine intentionally reports Android-only until that integration is completed. Web is a management companion only and cannot tunnel all device traffic.
 
 ## Generate and run Android locally
 
-Install Flutter 3.27+ and the Android SDK/Android Studio. From this folder:
+Install a Flutter stable release with Dart 3.8+ and the Android SDK/Android Studio. From this folder:
 
 ```sh
 flutter create --platforms=android --project-name=v2rayag_vpn .
@@ -44,7 +45,7 @@ Use a server link you control for device testing. Never commit credentials, UUID
 
 1. Generate/check in Android platform scaffolding and run real-device tests.
 2. Verify the Xray runtime notices and dependency checksums in release builds.
-3. Add secure profile storage and explicit-consent subscription refresh.
+3. Test secure subscription storage, HTTPS refresh, clipboard/QR import, and the exclusive one-tap flow on real Android devices.
 4. Add the iPhone extension, entitlements, signing, and device testing.
 5. Add trusted server-country metadata without any lookup or display of the user's source IP.
 

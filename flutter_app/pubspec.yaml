@@ -4,13 +4,15 @@ publish_to: 'none'
 version: 0.1.0+1
 
 environment:
-  sdk: '>=3.6.0 <4.0.0'
+  sdk: '>=3.8.0 <4.0.0'
   flutter: '>=3.27.0'
 
 dependencies:
   flutter:
     sdk: flutter
   flutter_vless: ^1.1.6
+  flutter_secure_storage: ^11.2.0
+  mobile_scanner: ^7.4.2
 
 dev_dependencies:
   flutter_test:
