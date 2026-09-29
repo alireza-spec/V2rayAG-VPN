@@ -12,6 +12,10 @@ void main() {
       expect(profile.protocol, 'VLESS');
       expect(profile.destination, 'example.org:443');
       expect(profile.name, 'Amsterdam');
+      expect(
+        [profile.name, profile.protocol, profile.host, profile.destination].join(' '),
+        isNot(contains('secret-user-id')),
+      );
     });
 
     test('extracts metadata from a VMess share link', () {
@@ -25,7 +29,10 @@ void main() {
       expect(profile.protocol, 'VMess');
       expect(profile.destination, 'vmess.example.net:8443');
       expect(profile.name, 'Test route');
-      expect(profile.toString().contains('secret-uuid'), isFalse);
+      expect(
+        [profile.name, profile.protocol, profile.host, profile.destination].join(' '),
+        isNot(contains('secret-uuid')),
+      );
     });
 
     test('parses Trojan and Shadowsocks destinations', () {
