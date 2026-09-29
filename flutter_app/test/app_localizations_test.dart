@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
-import 'app_localizations.dart';
+import 'package:v2rayag_vpn/app_localizations.dart';
 
 void main() {
   test('English remains the source-string fallback', () {
