@@ -27,8 +27,7 @@ class VpnProfile {
   static VpnProfile fromParsed(FlutterVlessURL parsed) {
     final config = parsed.getFullConfiguration();
     final decoded = const XrayConfigValidator().validateJsonString(config);
-    if (decoded is! Map<String, dynamic> ||
-        decoded['outbounds'] is! List ||
+    if (decoded['outbounds'] is! List ||
         (decoded['outbounds'] as List).isEmpty) {
       throw const FormatException('The imported profile has no usable outbound.');
     }
