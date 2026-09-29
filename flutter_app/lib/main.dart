@@ -2,6 +2,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
 
+import 'app_localizations.dart';
+import 'language_preferences.dart';
 import 'subscription_service.dart';
 import 'vpn_engine.dart';
 import 'vpn_profile.dart';
@@ -32,6 +34,36 @@ class _V2rayAgAppState extends State<V2rayAgApp> {
   ThemeMode _themeMode = ThemeMode.light;
   bool _reducedMotion = false;
   bool _showDestination = true;
+  Locale _locale = const Locale('en');
+  bool _languageChangedByUser = false;
+  final LanguagePreferenceRepository _languagePreferences =
+      LanguagePreferenceRepository();
+
+  @override
+  void initState() {
+    super.initState();
+    _restoreLanguage();
+  }
+
+  Future<void> _restoreLanguage() async {
+    final locale = await _languagePreferences.readLocale();
+    if (mounted && !_languageChangedByUser) setState(() => _locale = locale);
+  }
+
+  Future<void> _changeLanguage(Locale locale) async {
+    final supported = locale.languageCode == 'fa' ? const Locale('fa') : const Locale('en');
+    _languageChangedByUser = true;
+    setState(() => _locale = supported);
+    try {
+      await _languagePreferences.saveLocale(supported);
+    } on Object {
+      if (!mounted) return;
+      setState(() => _locale = const Locale('en'));
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: LocalizedText('Language preference could not be saved. English has been restored.')),
+      );
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -57,10 +89,15 @@ class _V2rayAgAppState extends State<V2rayAgApp> {
     return MaterialApp(
       title: 'V2rayAG VPN',
       debugShowCheckedModeBanner: false,
+      locale: _locale,
+      supportedLocales: V2rayLocalizations.supportedLocales,
+      localizationsDelegates: V2rayLocalizations.localizationsDelegates,
       theme: buildTheme(Brightness.light),
       darkTheme: buildTheme(Brightness.dark),
       themeMode: _themeMode,
       home: VpnShell(
+        locale: _locale,
+        onLocaleChanged: _changeLanguage,
         reducedMotion: _reducedMotion,
         showDestination: _showDestination,
         onReducedMotionChanged: (value) => setState(() => _reducedMotion = value),
@@ -76,6 +113,8 @@ class _V2rayAgAppState extends State<V2rayAgApp> {
 
 class VpnShell extends StatefulWidget {
   const VpnShell({
+    required this.locale,
+    required this.onLocaleChanged,
     required this.reducedMotion,
     required this.showDestination,
     required this.onReducedMotionChanged,
@@ -85,6 +124,8 @@ class VpnShell extends StatefulWidget {
     super.key,
   });
 
+  final Locale locale;
+  final ValueChanged<Locale> onLocaleChanged;
   final bool reducedMotion;
   final bool showDestination;
   final ValueChanged<bool> onReducedMotionChanged;
@@ -136,7 +177,7 @@ class _VpnShellState extends State<VpnShell> {
   }
 
   void _showMessage(String message) {
-    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(message)));
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: LocalizedText(message)));
   }
 
   Future<void> _toggleConnection() async {
@@ -386,6 +427,8 @@ class _VpnShellState extends State<VpnShell> {
         subscriptionBusy: _subscriptionBusy,
       ),
       _SettingsPage(
+        locale: widget.locale,
+        onLocaleChanged: widget.onLocaleChanged,
         reducedMotion: widget.reducedMotion,
         showDestination: widget.showDestination,
         darkMode: widget.darkMode,
@@ -405,15 +448,15 @@ class _VpnShellState extends State<VpnShell> {
             Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text('V2rayAG', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w800)),
-                Text('PRIVATE ROUTE', style: TextStyle(fontSize: 9, letterSpacing: 1.7, color: _muted)),
+                LocalizedText('V2rayAG', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w800)),
+                LocalizedText('PRIVATE ROUTE', style: TextStyle(fontSize: 9, letterSpacing: 1.7, color: _muted)),
               ],
             ),
           ],
         ),
         actions: [
           IconButton(
-            tooltip: 'Import a server link',
+            tooltip: context.tr('Import a server link'),
             onPressed: _importProfile,
             icon: const Icon(Icons.add_link_rounded),
           ),
@@ -427,10 +470,10 @@ class _VpnShellState extends State<VpnShell> {
       bottomNavigationBar: NavigationBar(
         selectedIndex: _tab,
         onDestinationSelected: (index) => setState(() => _tab = index),
-        destinations: const [
-          NavigationDestination(icon: Icon(Icons.radio_button_checked_rounded), label: 'Connect'),
-          NavigationDestination(icon: Icon(Icons.public_rounded), label: 'Servers'),
-          NavigationDestination(icon: Icon(Icons.tune_rounded), label: 'Settings'),
+        destinations: [
+          NavigationDestination(icon: const Icon(Icons.radio_button_checked_rounded), label: context.tr('Connect')),
+          NavigationDestination(icon: const Icon(Icons.public_rounded), label: context.tr('Servers')),
+          NavigationDestination(icon: const Icon(Icons.tune_rounded), label: context.tr('Settings')),
         ],
       ),
     );
@@ -471,14 +514,14 @@ class _HomePage extends StatelessWidget {
     return ListView(
       padding: const EdgeInsets.fromLTRB(20, 16, 20, 30),
       children: [
-        Text('Your quiet corner of the internet.',
+        LocalizedText('Your quiet corner of the internet.',
             style: Theme.of(context).textTheme.headlineSmall?.copyWith(
                   fontWeight: FontWeight.w800,
                   color: dark ? Colors.white : _ink,
                   letterSpacing: -.6,
                 )),
         const SizedBox(height: 6),
-        const Text('A clean route, on your terms.', style: TextStyle(color: _muted, fontSize: 14)),
+        const LocalizedText('A clean route, on your terms.', style: TextStyle(color: _muted, fontSize: 14)),
         const SizedBox(height: 28),
         Center(
           child: _PowerOrb(
@@ -494,9 +537,9 @@ class _HomePage extends StatelessWidget {
         Center(
           child: Column(
             children: [
-              Text(engine.stateLabel, style: TextStyle(fontSize: 12, letterSpacing: 2.1, fontWeight: FontWeight.w800, color: engine.connected ? const Color(0xFF28866A) : _ink)),
+              LocalizedText(engine.stateLabel, style: TextStyle(fontSize: 12, letterSpacing: 2.1, fontWeight: FontWeight.w800, color: engine.connected ? const Color(0xFF28866A) : _ink)),
               const SizedBox(height: 5),
-              Text(
+              LocalizedText(
                 profile == null
                     ? 'Import a server before connecting'
                     : engine.connected
@@ -525,11 +568,11 @@ class _HomePage extends StatelessWidget {
             const Row(children: [
               Icon(Icons.bolt_rounded, color: Color(0xFF25856C)),
               SizedBox(width: 8),
-              Expanded(child: Text('Exclusive V2rayAG Subs', style: TextStyle(fontWeight: FontWeight.w800, color: _ink))),
+              Expanded(child: LocalizedText('Exclusive V2rayAG Subs', style: TextStyle(fontWeight: FontWeight.w800, color: _ink))),
               Icon(Icons.lock_outline_rounded, size: 18, color: _muted),
             ]),
             const SizedBox(height: 5),
-            Text(
+            LocalizedText(
               exclusiveReady ? 'Saved securely on this device' : 'Add your private URL once for one-tap connect',
               style: const TextStyle(fontSize: 12, color: _muted),
             ),
@@ -541,7 +584,7 @@ class _HomePage extends StatelessWidget {
                 icon: subscriptionBusy
                     ? const SizedBox(width: 17, height: 17, child: CircularProgressIndicator(strokeWidth: 2))
                     : const Icon(Icons.flash_on_rounded),
-                label: Text(subscriptionBusy ? 'Loading subscription…' : (exclusiveReady ? 'Connect to Exclusive Subs' : 'Set up & connect')),
+                label: LocalizedText(subscriptionBusy ? 'Loading subscription…' : (exclusiveReady ? 'Connect to Exclusive Subs' : 'Set up & connect')),
               ),
             ),
           ]),
@@ -561,19 +604,22 @@ class _HomePage extends StatelessWidget {
               Row(children: [
                 const Icon(Icons.route_rounded, size: 18, color: Color(0xFF31896F)),
                 const SizedBox(width: 8),
-                const Expanded(child: Text('DESTINATION', style: TextStyle(fontSize: 10, letterSpacing: 1.4, fontWeight: FontWeight.w800, color: _muted))),
-                Text(profile?.protocol ?? 'NO SERVER', style: const TextStyle(fontSize: 10, fontWeight: FontWeight.w800, color: _muted)),
+                const Expanded(child: LocalizedText('DESTINATION', style: TextStyle(fontSize: 10, letterSpacing: 1.4, fontWeight: FontWeight.w800, color: _muted))),
+                Text(profile?.protocol ?? context.tr('NO SERVER'), textDirection: TextDirection.ltr, style: const TextStyle(fontSize: 10, fontWeight: FontWeight.w800, color: _muted)),
               ]),
               const SizedBox(height: 13),
-              Text(
-                showDestination ? (profile?.destination ?? 'Add a server link') : 'Destination hidden',
-                style: TextStyle(fontSize: 18, fontWeight: FontWeight.w800, color: dark ? Colors.white : _ink),
+              Directionality(
+                textDirection: showDestination && profile != null ? TextDirection.ltr : Directionality.of(context),
+                child: Text(
+                  showDestination ? (profile?.destination ?? context.tr('Add a server link')) : context.tr('Destination hidden'),
+                  style: TextStyle(fontSize: 18, fontWeight: FontWeight.w800, color: dark ? Colors.white : _ink),
+                ),
               ),
               const SizedBox(height: 5),
-              Text(profile == null ? 'No client address is read or displayed.' : 'Country: not looked up',
+              LocalizedText(profile == null ? 'No client address is read or displayed.' : 'Country: not looked up',
                   style: const TextStyle(fontSize: 12, color: _muted)),
               const SizedBox(height: 8),
-              Text(
+              LocalizedText(
                 engine.connected
                     ? '↓ ${engine.status.downloadSpeed} B/s   ↑ ${engine.status.uploadSpeed} B/s'
                     : 'Live traffic stats appear after a real connection.',
@@ -586,7 +632,7 @@ class _HomePage extends StatelessWidget {
                       ? null
                       : onMeasurePing,
                   icon: const Icon(Icons.speed_rounded, size: 17),
-                  label: Text(engine.lastPingMs == null ? 'Test latency' : '${engine.lastPingMs} ms'),
+                  label: LocalizedText(engine.lastPingMs == null ? 'Test latency' : '${engine.lastPingMs} ms'),
                 ),
               ]),
               const SizedBox(height: 8),
@@ -594,12 +640,12 @@ class _HomePage extends StatelessWidget {
                 Expanded(child: OutlinedButton.icon(
                   onPressed: onImport,
                   icon: const Icon(Icons.add_rounded),
-                  label: const Text('Import server'),
+                  label: const LocalizedText('Import server'),
                   style: OutlinedButton.styleFrom(shape: const StadiumBorder(), foregroundColor: const Color(0xFF317D68)),
                 )),
                 const SizedBox(width: 10),
                 IconButton.filledTonal(
-                  tooltip: 'View servers',
+                  tooltip: context.tr('View servers'),
                   onPressed: onOpenProfiles,
                   icon: const Icon(Icons.arrow_forward_rounded),
                 ),
@@ -615,7 +661,7 @@ class _HomePage extends StatelessWidget {
             Icon(Icons.info_outline_rounded, size: 17, color: Color(0xFFB35E49)),
             SizedBox(width: 9),
             Expanded(
-              child: Text(
+              child: LocalizedText(
                 'Subscription URLs are encrypted in Android secure storage and never committed to GitHub. Imported server configs stay in app memory. The app never reads or displays your device IP.',
                 style: TextStyle(
                   fontSize: 11,
@@ -627,7 +673,7 @@ class _HomePage extends StatelessWidget {
           ]),
         ),
         const SizedBox(height: 23),
-        const Center(child: Text('Source: Telegram @V2rayAG  ·  Developer: HashtagAlireza',
+        const Center(child: LocalizedText('Source: Telegram @V2rayAG  ·  Developer: HashtagAlireza',
             textAlign: TextAlign.center, style: TextStyle(fontSize: 10, color: _muted))),
       ],
     );
@@ -725,9 +771,9 @@ class _ProfilesPage extends StatelessWidget {
     final exclusive = subscriptions.where((item) => item.id == exclusiveId).firstOrNull;
     final customSubscriptions = subscriptions.where((item) => item.id != exclusiveId).toList();
     return ListView(padding: const EdgeInsets.fromLTRB(20, 18, 20, 28), children: [
-      Text('Servers', style: Theme.of(context).textTheme.headlineMedium?.copyWith(fontWeight: FontWeight.w800)),
+      LocalizedText('Servers', style: Theme.of(context).textTheme.headlineMedium?.copyWith(fontWeight: FontWeight.w800)),
       const SizedBox(height: 6),
-      const Text('Add your subscription, refresh servers, and choose a route.', style: TextStyle(color: _muted)),
+      const LocalizedText('Add your subscription, refresh servers, and choose a route.', style: TextStyle(color: _muted)),
       const SizedBox(height: 18),
       Container(
         padding: const EdgeInsets.all(16),
@@ -739,11 +785,11 @@ class _ProfilesPage extends StatelessWidget {
           const Row(children: [
             Icon(Icons.bolt_rounded, color: Color(0xFF25856C)),
             SizedBox(width: 8),
-            Expanded(child: Text('Exclusive V2rayAG Subs', style: TextStyle(fontWeight: FontWeight.w800))),
+            Expanded(child: LocalizedText('Exclusive V2rayAG Subs', style: TextStyle(fontWeight: FontWeight.w800))),
             Icon(Icons.lock_outline_rounded, size: 18, color: _muted),
           ]),
           const SizedBox(height: 5),
-          Text(
+          LocalizedText(
             exclusive == null ? 'Enter your private subscription URL once.' : 'Saved securely on this device.',
             style: const TextStyle(fontSize: 12, color: _muted),
           ),
@@ -753,7 +799,7 @@ class _ProfilesPage extends StatelessWidget {
             icon: subscriptionBusy
                 ? const SizedBox(width: 17, height: 17, child: CircularProgressIndicator(strokeWidth: 2))
                 : const Icon(Icons.flash_on_rounded),
-            label: Text(subscriptionBusy ? 'Fetching servers…' : 'One-tap connect'),
+            label: LocalizedText(subscriptionBusy ? 'Fetching servers…' : 'One-tap connect'),
           )),
           if (exclusive != null)
             Align(
@@ -761,20 +807,20 @@ class _ProfilesPage extends StatelessWidget {
               child: TextButton.icon(
                 onPressed: connected ? null : () => onEditSubscription(exclusive),
                 icon: const Icon(Icons.edit_outlined, size: 17),
-                label: const Text('Change URL'),
+                label: const LocalizedText('Change URL'),
               ),
             ),
         ]),
       ),
       const SizedBox(height: 16),
       Row(children: [
-        const Expanded(child: Text('My subscriptions', style: TextStyle(fontSize: 17, fontWeight: FontWeight.w800))),
-        TextButton.icon(onPressed: connected ? null : onAddSubscription, icon: const Icon(Icons.add_rounded), label: const Text('Add')),
+        const Expanded(child: LocalizedText('My subscriptions', style: TextStyle(fontSize: 17, fontWeight: FontWeight.w800))),
+        TextButton.icon(onPressed: connected ? null : onAddSubscription, icon: const Icon(Icons.add_rounded), label: const LocalizedText('Add')),
       ]),
       if (customSubscriptions.isEmpty)
         const Padding(
           padding: EdgeInsets.only(bottom: 8),
-          child: Text('Paste a secure HTTPS URL or scan its QR code. URLs are stored on this device only.', style: TextStyle(color: _muted, fontSize: 12)),
+          child: LocalizedText('Paste a secure HTTPS URL or scan its QR code. URLs are stored on this device only.', style: TextStyle(color: _muted, fontSize: 12)),
         )
       else
         ...customSubscriptions.map((subscription) => Card(
@@ -783,16 +829,16 @@ class _ProfilesPage extends StatelessWidget {
           child: ListTile(
             leading: const CircleAvatar(backgroundColor: Color(0xFFE5F6EF), child: Icon(Icons.rss_feed_rounded, color: Color(0xFF317D68))),
             title: Text(subscription.name, maxLines: 1, overflow: TextOverflow.ellipsis),
-            subtitle: const Text('Private URL stored on this device'),
+            subtitle: const LocalizedText('Private URL stored on this device'),
             trailing: Wrap(spacing: 0, children: [
-              IconButton(tooltip: 'Refresh servers', onPressed: connected || subscriptionBusy ? null : () => onRefreshSubscription(subscription), icon: const Icon(Icons.refresh_rounded)),
-              IconButton(tooltip: 'Edit subscription', onPressed: connected ? null : () => onEditSubscription(subscription), icon: const Icon(Icons.edit_outlined)),
-              IconButton(tooltip: 'Remove subscription', onPressed: connected ? null : () => onRemoveSubscription(subscription), icon: const Icon(Icons.delete_outline_rounded)),
+              IconButton(tooltip: context.tr('Refresh servers'), onPressed: connected || subscriptionBusy ? null : () => onRefreshSubscription(subscription), icon: const Icon(Icons.refresh_rounded)),
+              IconButton(tooltip: context.tr('Edit subscription'), onPressed: connected ? null : () => onEditSubscription(subscription), icon: const Icon(Icons.edit_outlined)),
+              IconButton(tooltip: context.tr('Remove subscription'), onPressed: connected ? null : () => onRemoveSubscription(subscription), icon: const Icon(Icons.delete_outline_rounded)),
             ]),
           ),
         )),
       const SizedBox(height: 10),
-      FilledButton.tonalIcon(onPressed: connected ? null : onImport, icon: const Icon(Icons.add_link_rounded), label: const Text('Import one server link')),
+      FilledButton.tonalIcon(onPressed: connected ? null : onImport, icon: const Icon(Icons.add_link_rounded), label: const LocalizedText('Import one server link')),
       const SizedBox(height: 14),
       if (profiles.isEmpty)
         _EmptyCard(dark: dark)
@@ -812,14 +858,23 @@ class _ProfilesPage extends StatelessWidget {
               onTap: () => onSelect(index),
               leading: CircleAvatar(backgroundColor: const Color(0xFFE5F6EF), child: Text(profile.protocol.substring(0, 1), style: const TextStyle(color: Color(0xFF317D68), fontWeight: FontWeight.w800))),
               title: Text(profile.name, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontWeight: FontWeight.w700)),
-              subtitle: Text('${profile.protocol} · ${showDestination ? profile.destination : 'Destination hidden'}\nCountry not looked up · ${active && connected ? 'connected' : 'ready'}', style: const TextStyle(height: 1.5)),
+              subtitle: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Directionality(
+                    textDirection: TextDirection.ltr,
+                    child: Text('${profile.protocol} · ${showDestination ? profile.destination : context.tr('Destination hidden')}'),
+                  ),
+                  Text('${context.tr('Country not looked up')} · ${context.tr(active && connected ? 'connected' : 'ready')}'),
+                ],
+              ),
               isThreeLine: true,
-              trailing: IconButton(tooltip: 'Remove profile', onPressed: connected && active ? null : () => onRemove(index), icon: const Icon(Icons.close_rounded)),
+              trailing: IconButton(tooltip: context.tr('Remove profile'), onPressed: connected && active ? null : () => onRemove(index), icon: const Icon(Icons.close_rounded)),
             ),
           );
         }),
       const SizedBox(height: 12),
-      const Text('Profile configs exist only in app memory during this session. Do not share screenshots or logs that reveal a server address.', style: TextStyle(fontSize: 12, color: _muted, height: 1.45)),
+      const LocalizedText('Profile configs exist only in app memory during this session. Do not share screenshots or logs that reveal a server address.', style: TextStyle(fontSize: 12, color: _muted, height: 1.45)),
     ]);
   }
 }
@@ -836,15 +891,17 @@ class _EmptyCard extends StatelessWidget {
         child: const Column(children: [
           Icon(Icons.public_rounded, size: 35, color: Color(0xFF58A98E)),
           SizedBox(height: 13),
-          Text('Your server list is empty', style: TextStyle(fontSize: 17, fontWeight: FontWeight.w800)),
+          LocalizedText('Your server list is empty', style: TextStyle(fontSize: 17, fontWeight: FontWeight.w800)),
           SizedBox(height: 6),
-          Text('Import a single VLESS, VMess, Shadowsocks, or Trojan server link to prepare an Android VPN route.', textAlign: TextAlign.center, style: TextStyle(color: _muted, height: 1.45)),
+          LocalizedText('Import a single VLESS, VMess, Shadowsocks, or Trojan server link to prepare an Android VPN route.', textAlign: TextAlign.center, style: TextStyle(color: _muted, height: 1.45)),
         ]),
       );
 }
 
 class _SettingsPage extends StatelessWidget {
   const _SettingsPage({
+    required this.locale,
+    required this.onLocaleChanged,
     required this.reducedMotion,
     required this.showDestination,
     required this.darkMode,
@@ -853,6 +910,8 @@ class _SettingsPage extends StatelessWidget {
     required this.onThemeChanged,
   });
 
+  final Locale locale;
+  final ValueChanged<Locale> onLocaleChanged;
   final bool reducedMotion;
   final bool showDestination;
   final bool darkMode;
@@ -862,29 +921,42 @@ class _SettingsPage extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) => ListView(padding: const EdgeInsets.fromLTRB(20, 18, 20, 28), children: [
-        Text('Settings', style: Theme.of(context).textTheme.headlineMedium?.copyWith(fontWeight: FontWeight.w800)),
+        LocalizedText('Settings', style: Theme.of(context).textTheme.headlineMedium?.copyWith(fontWeight: FontWeight.w800)),
         const SizedBox(height: 6),
-        const Text('Appearance settings work now; Android VPN connection is managed from Connect.', style: TextStyle(color: _muted)),
+        const LocalizedText('Appearance settings work now; Android VPN connection is managed from Connect.', style: TextStyle(color: _muted)),
         const SizedBox(height: 20),
         Card(elevation: 0, color: Theme.of(context).colorScheme.surface, child: Column(children: [
-          SwitchListTile(title: const Text('Dark appearance'), subtitle: const Text('Change the app theme'), value: darkMode, onChanged: onThemeChanged),
+          ListTile(
+            title: const LocalizedText('App language'),
+            subtitle: const LocalizedText('Choose the language used throughout the app'),
+            trailing: DropdownButton<Locale>(
+              value: locale,
+              onChanged: (value) { if (value != null) onLocaleChanged(value); },
+              items: const [
+                DropdownMenuItem(value: Locale('en'), child: LocalizedText('English')),
+                DropdownMenuItem(value: Locale('fa'), child: LocalizedText('فارسی')),
+              ],
+            ),
+          ),
           const Divider(height: 1, indent: 16, endIndent: 16),
-          SwitchListTile(title: const Text('Reduce animations'), subtitle: const Text('Reduce decorative motion'), value: reducedMotion, onChanged: onReducedMotionChanged),
+          SwitchListTile(title: const LocalizedText('Dark appearance'), subtitle: const LocalizedText('Change the app theme'), value: darkMode, onChanged: onThemeChanged),
           const Divider(height: 1, indent: 16, endIndent: 16),
-          SwitchListTile(title: const Text('Show destination address'), subtitle: const Text('Hides the server address in the UI'), value: showDestination, onChanged: onShowDestinationChanged),
+          SwitchListTile(title: const LocalizedText('Reduce animations'), subtitle: const LocalizedText('Reduce decorative motion'), value: reducedMotion, onChanged: onReducedMotionChanged),
+          const Divider(height: 1, indent: 16, endIndent: 16),
+          SwitchListTile(title: const LocalizedText('Show destination address'), subtitle: const LocalizedText('Hides the server address in the UI'), value: showDestination, onChanged: onShowDestinationChanged),
         ])),
         const SizedBox(height: 16),
         Container(
           padding: const EdgeInsets.all(16),
           decoration: BoxDecoration(color: const Color(0xFFFFF1E8), borderRadius: BorderRadius.circular(20)),
           child: const Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-            Text('Platform scope', style: TextStyle(fontWeight: FontWeight.w800, color: Color(0xFF8A5548))),
+            LocalizedText('Platform scope', style: TextStyle(fontWeight: FontWeight.w800, color: Color(0xFF8A5548))),
             SizedBox(height: 8),
-            Text('The Android tunnel uses the native Xray-backed VPN service. iPhone still needs its Network Extension project, Apple signing, and device testing. DNS policy, kill switch, auto-connect, and trusted country lookup are not enabled in this build.', style: TextStyle(fontSize: 12, height: 1.5, color: Color(0xFF8A5548))),
+            LocalizedText('The Android tunnel uses the native Xray-backed VPN service. iPhone still needs its Network Extension project, Apple signing, and device testing. DNS policy, kill switch, auto-connect, and trusted country lookup are not enabled in this build.', style: TextStyle(fontSize: 12, height: 1.5, color: Color(0xFF8A5548))),
           ]),
         ),
         const SizedBox(height: 20),
-        const ListTile(leading: _BrandMark(), title: Text('V2rayAG VPN'), subtitle: Text('Source: Telegram @V2rayAG\nDeveloper: V2rayAG telegram channel and HashtagAlireza')),
+        const ListTile(leading: _BrandMark(), title: LocalizedText('V2rayAG VPN'), subtitle: LocalizedText('Source: Telegram @V2rayAG\nDeveloper: V2rayAG telegram channel and HashtagAlireza')),
       ]);
 }
 
@@ -894,13 +966,13 @@ Future<String?> _readClipboard(BuildContext context) async {
     if (!context.mounted) return null;
     final value = data?.text?.trim();
     if (value == null || value.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Clipboard is empty.')));
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: LocalizedText('Clipboard is empty.')));
       return null;
     }
     return value;
   } on Object {
     if (!context.mounted) return null;
-    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Could not read the clipboard.')));
+    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: LocalizedText('Could not read the clipboard.')));
     return null;
   }
 }
@@ -937,7 +1009,7 @@ class _QrScanDialogState extends State<_QrScanDialog> {
   Widget build(BuildContext context) => Dialog.fullscreen(
         child: Scaffold(
           appBar: AppBar(
-            title: const Text('Scan a subscription QR'),
+            title: const LocalizedText('Scan a subscription QR'),
             leading: IconButton(onPressed: () => Navigator.of(context).pop(), icon: const Icon(Icons.close_rounded)),
           ),
           body: Stack(fit: StackFit.expand, children: [
@@ -958,7 +1030,7 @@ class _QrScanDialogState extends State<_QrScanDialog> {
               left: 24,
               right: 24,
               bottom: 36,
-              child: Text('Keep the QR code inside the frame. Its contents stay on this device.', textAlign: TextAlign.center, style: TextStyle(color: Colors.white, shadows: [Shadow(blurRadius: 8, color: Colors.black)])),
+              child: LocalizedText('Keep the QR code inside the frame. Its contents stay on this device.', textAlign: TextAlign.center, style: TextStyle(color: Colors.white, shadows: [Shadow(blurRadius: 8, color: Colors.black)])),
             ),
           ]),
         ),
@@ -1031,14 +1103,14 @@ class _SubscriptionEditorSheetState extends State<_SubscriptionEditorSheet> {
         child: SafeArea(top: false, child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
           Center(child: Container(width: 38, height: 4, decoration: BoxDecoration(color: Colors.grey.shade400, borderRadius: BorderRadius.circular(5)))),
           const SizedBox(height: 18),
-          Text(widget.fixedName ? 'Set up Exclusive V2rayAG Subs' : 'Add a subscription', style: const TextStyle(fontSize: 21, fontWeight: FontWeight.w800)),
+          LocalizedText(widget.fixedName ? 'Set up Exclusive V2rayAG Subs' : 'Add a subscription', style: const TextStyle(fontSize: 21, fontWeight: FontWeight.w800)),
           const SizedBox(height: 7),
-          const Text('Paste or scan your provider’s HTTPS subscription URL. Your own URL is needed; none is bundled with this app.', style: TextStyle(fontSize: 12, color: _muted, height: 1.4)),
+          const LocalizedText('Paste or scan your provider’s HTTPS subscription URL. Your own URL is needed; none is bundled with this app.', style: TextStyle(fontSize: 12, color: _muted, height: 1.4)),
           if (!widget.fixedName) ...[
             const SizedBox(height: 14),
             TextField(
               controller: _nameController,
-              decoration: InputDecoration(labelText: 'Name', filled: true, fillColor: const Color(0xFFF4F6F3), border: OutlineInputBorder(borderRadius: BorderRadius.circular(15), borderSide: BorderSide.none)),
+              decoration: InputDecoration(labelText: context.tr('Name'), filled: true, fillColor: const Color(0xFFF4F6F3), border: OutlineInputBorder(borderRadius: BorderRadius.circular(15), borderSide: BorderSide.none)),
             ),
           ],
           const SizedBox(height: 12),
@@ -1049,24 +1121,24 @@ class _SubscriptionEditorSheetState extends State<_SubscriptionEditorSheet> {
             enableSuggestions: false,
             keyboardType: TextInputType.url,
             decoration: InputDecoration(
-              labelText: 'Private HTTPS subscription URL',
-              hintText: 'https://…',
-              errorText: _error,
+              labelText: context.tr('Private HTTPS subscription URL'),
+              hintText: context.tr('https://…'),
+              errorText: _error == null ? null : context.tr(_error!),
               filled: true,
               fillColor: Theme.of(context).brightness == Brightness.dark ? const Color(0xFF101817) : const Color(0xFFF4F6F3),
               border: OutlineInputBorder(borderRadius: BorderRadius.circular(15), borderSide: BorderSide.none),
-              suffixIcon: IconButton(tooltip: _hideUrl ? 'Show URL' : 'Hide URL', onPressed: () => setState(() => _hideUrl = !_hideUrl), icon: Icon(_hideUrl ? Icons.visibility_outlined : Icons.visibility_off_outlined)),
+              suffixIcon: IconButton(tooltip: context.tr(_hideUrl ? 'Show URL' : 'Hide URL'), onPressed: () => setState(() => _hideUrl = !_hideUrl), icon: Icon(_hideUrl ? Icons.visibility_outlined : Icons.visibility_off_outlined)),
             ),
           ),
           const SizedBox(height: 8),
           Wrap(spacing: 8, children: [
-            OutlinedButton.icon(onPressed: _paste, icon: const Icon(Icons.content_paste_rounded), label: const Text('Paste clipboard')),
-            OutlinedButton.icon(onPressed: _scan, icon: const Icon(Icons.qr_code_scanner_rounded), label: const Text('Scan QR')),
+            OutlinedButton.icon(onPressed: _paste, icon: const Icon(Icons.content_paste_rounded), label: const LocalizedText('Paste clipboard')),
+            OutlinedButton.icon(onPressed: _scan, icon: const Icon(Icons.qr_code_scanner_rounded), label: const LocalizedText('Scan QR')),
           ]),
           const SizedBox(height: 8),
-          const Text('Saved with Android Keystore-backed encrypted storage. Fetching requires HTTPS; server entries stay in memory and are not uploaded to V2rayAG.', style: TextStyle(fontSize: 11, color: _muted, height: 1.4)),
+          const LocalizedText('Saved with Android Keystore-backed encrypted storage. Fetching requires HTTPS; server entries stay in memory and are not uploaded to V2rayAG.', style: TextStyle(fontSize: 11, color: _muted, height: 1.4)),
           const SizedBox(height: 14),
-          SizedBox(width: double.infinity, child: FilledButton(onPressed: _save, child: const Text('Save securely'))),
+          SizedBox(width: double.infinity, child: FilledButton(onPressed: _save, child: const LocalizedText('Save securely'))),
         ])),
       ),
     );
@@ -1123,9 +1195,9 @@ class _ImportSheetState extends State<_ImportSheet> {
         child: SafeArea(top: false, child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
           Center(child: Container(width: 38, height: 4, decoration: BoxDecoration(color: Colors.grey.shade400, borderRadius: BorderRadius.circular(5)))),
           const SizedBox(height: 18),
-          const Text('Import a server link', style: TextStyle(fontSize: 21, fontWeight: FontWeight.w800)),
+          const LocalizedText('Import a server link', style: TextStyle(fontSize: 21, fontWeight: FontWeight.w800)),
           const SizedBox(height: 6),
-          const Text('One server link: VLESS, VMess, Shadowsocks, or Trojan.', style: TextStyle(fontSize: 12, color: _muted)),
+          const LocalizedText('One server link: VLESS, VMess, Shadowsocks, or Trojan.', style: TextStyle(fontSize: 12, color: _muted)),
           const SizedBox(height: 14),
           TextField(
             controller: _controller,
@@ -1135,8 +1207,8 @@ class _ImportSheetState extends State<_ImportSheet> {
             autocorrect: false,
             enableSuggestions: false,
             decoration: InputDecoration(
-              hintText: 'Paste one server share link',
-              errorText: _error,
+              hintText: context.tr('Paste one server share link'),
+              errorText: _error == null ? null : context.tr(_error!),
               filled: true,
               fillColor: Theme.of(context).brightness == Brightness.dark ? const Color(0xFF101817) : const Color(0xFFF4F6F3),
               border: OutlineInputBorder(borderRadius: BorderRadius.circular(16), borderSide: BorderSide.none),
@@ -1145,13 +1217,13 @@ class _ImportSheetState extends State<_ImportSheet> {
           ),
           const SizedBox(height: 10),
           Wrap(spacing: 8, children: [
-            OutlinedButton.icon(onPressed: _paste, icon: const Icon(Icons.content_paste_rounded), label: const Text('Paste clipboard')),
-            OutlinedButton.icon(onPressed: _scan, icon: const Icon(Icons.qr_code_scanner_rounded), label: const Text('Scan QR')),
+            OutlinedButton.icon(onPressed: _paste, icon: const Icon(Icons.content_paste_rounded), label: const LocalizedText('Paste clipboard')),
+            OutlinedButton.icon(onPressed: _scan, icon: const Icon(Icons.qr_code_scanner_rounded), label: const LocalizedText('Scan QR')),
           ]),
           const SizedBox(height: 6),
-          const Text('A single server link is held in app memory for this session only. Use Add subscription for a provider URL.', style: TextStyle(fontSize: 11, color: _muted, height: 1.4)),
+          const LocalizedText('A single server link is held in app memory for this session only. Use Add subscription for a provider URL.', style: TextStyle(fontSize: 11, color: _muted, height: 1.4)),
           const SizedBox(height: 15),
-          SizedBox(width: double.infinity, child: FilledButton(onPressed: _preview, child: const Text('Add to this session'))),
+          SizedBox(width: double.infinity, child: FilledButton(onPressed: _preview, child: const LocalizedText('Add to this session'))),
         ])),
       ),
     );
