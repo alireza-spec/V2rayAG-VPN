@@ -123,7 +123,7 @@ class _V2rayAgAppState extends State<V2rayAgApp> {
         scaffoldBackgroundColor: dark ? const Color(0xFF0D1412) : _canvas,
         canvasColor: dark ? const Color(0xFF0D1412) : _canvas,
         cardColor: surface,
-        dialogBackgroundColor: surface,
+        dialogTheme: DialogThemeData(backgroundColor: surface),
         dividerColor: dark ? const Color(0xFF2C3A36) : const Color(0xFFE4E9E5),
         colorScheme: ColorScheme.fromSeed(
           seedColor: const Color(0xFF2E9478),
@@ -274,6 +274,7 @@ class _VpnShellState extends State<VpnShell> {
   }
 
   Future<void> _showConnectionDiagnostics() async {
+    final availableHeight = MediaQuery.sizeOf(context).height;
     final approved = await showDialog<bool>(
       context: context,
       builder: (dialogContext) => AlertDialog(
@@ -302,7 +303,7 @@ class _VpnShellState extends State<VpnShell> {
         title: const LocalizedText('Connection details'),
         content: SizedBox(
           width: double.maxFinite,
-          height: MediaQuery.sizeOf(context).height * .52,
+          height: availableHeight * .52,
           child: SingleChildScrollView(
             child: SelectableText(details, style: const TextStyle(fontSize: 12)),
           ),
