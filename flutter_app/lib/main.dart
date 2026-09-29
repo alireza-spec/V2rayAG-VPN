@@ -214,11 +214,13 @@ class _VpnShellState extends State<VpnShell> {
   final Completer<void> _routingPreferencesReady = Completer<void>();
   Future<void> _profileWriteQueue = Future<void>.value();
   bool _profileRestoreFailed = false;
+  String? _profileStorageErrorCode;
   bool _subscriptionRestoreFailed = false;
   List<SavedSubscription> _savedSubscriptions = [];
   bool _subscriptionBusy = false;
   int? _selectedIndex;
   final Map<int, int> _profilePings = {};
+  final Map<int, String> _profilePingFailures = {};
   final Set<int> _failedPings = {};
   final Set<int> _probingProfiles = {};
   String? _batchPingSubscriptionId;
@@ -295,9 +297,10 @@ class _VpnShellState extends State<VpnShell> {
       });
     } on Object catch (error) {
       _profileRestoreFailed = true;
+      _profileStorageErrorCode = _safeStorageFailure(error);
       if (mounted) {
         _showMessage(
-          'Saved profiles could not be restored (${_safeStorageFailure(error)}). Existing secure data will not be overwritten.',
+          'Saved profiles could not be restored ($_profileStorageErrorCode). Existing secure data will not be overwritten.',
         );
       }
     } finally {
@@ -309,7 +312,7 @@ class _VpnShellState extends State<VpnShell> {
     await _profilesReady.future;
     if (_profileRestoreFailed) {
       if (mounted) {
-        _showMessage('Profile storage could not be read; refusing to overwrite its existing data.');
+        _showMessage('Profile storage could not be read (${_profileStorageErrorCode ?? 'Unknown'}); refusing to overwrite existing data.');
       }
       return false;
     }
@@ -328,9 +331,10 @@ class _VpnShellState extends State<VpnShell> {
       await write;
       return true;
     } on Object catch (error) {
+      _profileStorageErrorCode = _safeStorageFailure(error);
       if (mounted) {
         _showMessage(
-          'Profiles could not be saved securely (${_safeStorageFailure(error)}); changes remain only until this app closes.',
+          'Profiles could not be saved securely ($_profileStorageErrorCode); changes remain only until this app closes.',
         );
       }
       return false;
@@ -575,6 +579,7 @@ class _VpnShellState extends State<VpnShell> {
     setState(() {
       _probingProfiles.add(index);
       _profilePings.remove(index);
+      _profilePingFailures.remove(index);
       _failedPings.remove(index);
     });
     final result = await _engine.measurePing(_profiles[index]);
@@ -583,8 +588,10 @@ class _VpnShellState extends State<VpnShell> {
       _probingProfiles.remove(index);
       if (result != null) {
         _profilePings[index] = result;
+        _profilePingFailures.remove(index);
         _failedPings.remove(index);
       } else {
+        _profilePingFailures[index] = _engine.failureCategory ?? 'NoDelayResult';
         _failedPings.add(index);
       }
     });
@@ -623,6 +630,7 @@ class _VpnShellState extends State<VpnShell> {
       _batchPingTotal = indices.length;
       _cancelBatchPing = false;
       _profilePings.removeWhere((index, _) => indices.contains(index));
+      _profilePingFailures.removeWhere((index, _) => indices.contains(index));
       _failedPings.removeAll(indices);
     });
     var responded = 0;
@@ -929,6 +937,7 @@ class _VpnShellState extends State<VpnShell> {
       _profiles.removeAt(index);
       if (index < _profileSources.length) _profileSources.removeAt(index);
       _profilePings.clear();
+      _profilePingFailures.clear();
       _failedPings.clear();
       _probingProfiles.clear();
       if (_profiles.isEmpty) {
@@ -966,6 +975,7 @@ class _VpnShellState extends State<VpnShell> {
         onSelect: _selectProfile,
         onRemove: _removeProfile,
         profilePings: _profilePings,
+        profilePingFailures: _profilePingFailures,
         failedPings: _failedPings,
         probingProfiles: _probingProfiles,
         onTestProfileLatency: _testProfileLatency,
@@ -1194,7 +1204,7 @@ class _HomePage extends StatelessWidget {
             const SizedBox(width: 9),
             Expanded(
               child: LocalizedText(
-                'Subscription URLs are encrypted in Android secure storage and never committed to GitHub. Imported server configs stay in app memory. The app never reads or displays your device IP.',
+                'Subscription URLs and imported server configs are saved in encrypted Android storage after a successful save and are never committed to GitHub. If secure storage fails, the app reports it rather than overwriting unreadable data. The app never reads or displays your device IP.',
                 style: TextStyle(
                   fontSize: 11,
                   height: 1.45,
@@ -1406,6 +1416,7 @@ class _ProfilesPage extends StatelessWidget {
     required this.onSelect,
     required this.onRemove,
     required this.profilePings,
+    required this.profilePingFailures,
     required this.failedPings,
     required this.probingProfiles,
     required this.onTestProfileLatency,
@@ -1431,6 +1442,7 @@ class _ProfilesPage extends StatelessWidget {
   final ValueChanged<int> onSelect;
   final ValueChanged<int> onRemove;
   final Map<int, int> profilePings;
+  final Map<int, String> profilePingFailures;
   final Set<int> failedPings;
   final Set<int> probingProfiles;
   final ValueChanged<int> onTestProfileLatency;
@@ -1487,8 +1499,10 @@ class _ProfilesPage extends StatelessWidget {
               Text('${context.tr('Latency')}: ${profilePings[index]} ms',
                   style: const TextStyle(color: _muted, fontSize: 12)),
             if (failedPings.contains(index))
-              Text(context.tr('No ping response'),
-                  style: const TextStyle(color: _coral, fontSize: 12)),
+              Text(
+                '${context.tr('No ping response')} · ${profilePingFailures[index] ?? 'NoDelayResult'}',
+                style: const TextStyle(color: _coral, fontSize: 12),
+              ),
           ],
         ),
         isThreeLine: true,
@@ -1980,9 +1994,9 @@ class _ImportSheetState extends State<_ImportSheet> {
             OutlinedButton.icon(onPressed: _scan, icon: const Icon(Icons.qr_code_scanner_rounded), label: const LocalizedText('Scan QR')),
           ]),
           const SizedBox(height: 6),
-          const LocalizedText('Only supported server links are imported. Extra text is ignored; imported configurations stay in app memory for this session. Use Add subscription for a provider URL.', style: TextStyle(fontSize: 11, color: _muted, height: 1.4)),
+          const LocalizedText('Only supported server links are imported. Extra text is ignored. After import, profiles are saved using encrypted Android storage; if that storage is unavailable, the app will show an error and will not overwrite unreadable data. Use Add subscription for a provider URL.', style: TextStyle(fontSize: 11, color: _muted, height: 1.4)),
           const SizedBox(height: 15),
-          SizedBox(width: double.infinity, child: FilledButton(onPressed: _preview, child: const LocalizedText('Add server links to this session'))),
+          SizedBox(width: double.infinity, child: FilledButton(onPressed: _preview, child: const LocalizedText('Import server links'))),
         ])),
       ),
     );
