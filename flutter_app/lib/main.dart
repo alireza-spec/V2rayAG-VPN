@@ -791,13 +791,9 @@ class _VpnShellState extends State<VpnShell> {
         engine: _engine,
         showDestination: widget.showDestination,
         reducedMotion: widget.reducedMotion,
-        onImport: _importProfile,
         onToggleConnection: _toggleConnection,
         onMeasurePing: _measurePing,
         onShowDiagnostics: _showConnectionDiagnostics,
-        onOpenProfiles: () => setState(() => _tab = 1),
-        onExclusiveConnect: _connectExclusiveSubscription,
-        exclusiveReady: _savedSubscriptions.any((item) => item.id == _exclusiveId),
         subscriptionBusy: _subscriptionBusy,
       ),
       _ProfilesPage(
@@ -850,14 +846,7 @@ class _VpnShellState extends State<VpnShell> {
             ),
           ],
         ),
-        actions: [
-          IconButton(
-            tooltip: context.tr('Import a server link'),
-            onPressed: _importProfile,
-            icon: const Icon(Icons.add_link_rounded),
-          ),
-          const SizedBox(width: 8),
-        ],
+        actions: const [SizedBox(width: 8)],
       ),
       body: SafeArea(
         top: false,
@@ -882,13 +871,9 @@ class _HomePage extends StatelessWidget {
     required this.engine,
     required this.showDestination,
     required this.reducedMotion,
-    required this.onImport,
     required this.onToggleConnection,
     required this.onMeasurePing,
     required this.onShowDiagnostics,
-    required this.onOpenProfiles,
-    required this.onExclusiveConnect,
-    required this.exclusiveReady,
     required this.subscriptionBusy,
   });
 
@@ -896,13 +881,9 @@ class _HomePage extends StatelessWidget {
   final VpnEngine engine;
   final bool showDestination;
   final bool reducedMotion;
-  final VoidCallback onImport;
   final VoidCallback onToggleConnection;
   final VoidCallback onMeasurePing;
   final VoidCallback onShowDiagnostics;
-  final VoidCallback onOpenProfiles;
-  final VoidCallback onExclusiveConnect;
-  final bool exclusiveReady;
   final bool subscriptionBusy;
 
   @override
@@ -970,41 +951,6 @@ class _HomePage extends StatelessWidget {
         ),
         const SizedBox(height: 18),
         Container(
-          padding: const EdgeInsets.all(16),
-          decoration: BoxDecoration(
-            gradient: LinearGradient(colors: dark
-                ? const [Color(0xFF17332D), Color(0xFF282239)]
-                : const [Color(0xFFE7F8F1), Color(0xFFF3EAFE)]),
-            borderRadius: BorderRadius.circular(22),
-            border: dark ? Border.all(color: Colors.white10) : null,
-          ),
-          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-            Row(children: [
-              const Icon(Icons.bolt_rounded, color: Color(0xFF58D7B2)),
-              const SizedBox(width: 8),
-              Expanded(child: LocalizedText('Exclusive V2rayAG Subs', style: TextStyle(fontWeight: FontWeight.w800, color: dark ? Colors.white : _ink))),
-              const Icon(Icons.lock_outline_rounded, size: 18, color: _muted),
-            ]),
-            const SizedBox(height: 5),
-            LocalizedText(
-              exclusiveReady ? 'Saved securely on this device' : 'Add your private URL once for one-tap connect',
-              style: const TextStyle(fontSize: 12, color: _muted),
-            ),
-            const SizedBox(height: 12),
-            SizedBox(
-              width: double.infinity,
-              child: FilledButton.icon(
-                onPressed: subscriptionBusy ? null : onExclusiveConnect,
-                icon: subscriptionBusy
-                    ? const SizedBox(width: 17, height: 17, child: CircularProgressIndicator(strokeWidth: 2))
-                    : const Icon(Icons.flash_on_rounded),
-                label: LocalizedText(subscriptionBusy ? 'Loading subscription…' : (exclusiveReady ? 'Connect to Exclusive Subs' : 'Set up & connect')),
-              ),
-            ),
-          ]),
-        ),
-        const SizedBox(height: 17),
-        Container(
           decoration: BoxDecoration(
             color: card,
             borderRadius: BorderRadius.circular(25),
@@ -1067,20 +1013,6 @@ class _HomePage extends StatelessWidget {
                 ),
               ]),
               const SizedBox(height: 8),
-              Row(children: [
-                Expanded(child: OutlinedButton.icon(
-                  onPressed: subscriptionBusy ? null : onImport,
-                  icon: const Icon(Icons.add_rounded),
-                  label: const LocalizedText('Import server'),
-                  style: OutlinedButton.styleFrom(shape: const StadiumBorder(), foregroundColor: const Color(0xFF317D68)),
-                )),
-                const SizedBox(width: 10),
-                IconButton.filledTonal(
-                  tooltip: context.tr('View servers'),
-                  onPressed: onOpenProfiles,
-                  icon: const Icon(Icons.arrow_forward_rounded),
-                ),
-              ]),
             ],
           ),
         ),
