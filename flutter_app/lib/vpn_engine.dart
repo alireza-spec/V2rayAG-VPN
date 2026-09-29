@@ -14,7 +14,6 @@ class VpnEngine extends ChangeNotifier {
   bool _startPending = false;
   bool _awaitingStartStatus = false;
   bool _stopPending = false;
-  bool _stateKnown = false;
   bool _disposed = false;
   String? _message;
   String? _coreVersion;
@@ -23,7 +22,6 @@ class VpnEngine extends ChangeNotifier {
   VlessStatus get status => _status;
   bool get initialized => _initialized;
   bool get busy => _busy;
-  bool get stateKnown => _stateKnown;
   String? get message => _message;
   String? get coreVersion => _coreVersion;
   int? get lastPingMs => _lastPingMs;
@@ -36,13 +34,15 @@ class VpnEngine extends ChangeNotifier {
   bool get disconnecting =>
       _stopPending || _status.connectionState == VlessConnectionState.disconnecting;
 
-  /// We only start a new tunnel after the native engine has explicitly reported
-  /// a disconnected state. Unknown state is fail-closed (for example, after an
-  /// app restart while an Android foreground VPN service may still be active).
+  /// Allows the first user-initiated start after plugin initialization even if
+  /// the native backend has not emitted an initial status event. Unknown status
+  /// must not leave the connect control disabled forever. Explicit active or
+  /// transitional states still prevent duplicate starts.
   bool get canStart =>
       _initialized &&
-      _stateKnown &&
-      _status.connectionState == VlessConnectionState.disconnected &&
+      _status.connectionState != VlessConnectionState.connected &&
+      _status.connectionState != VlessConnectionState.connecting &&
+      _status.connectionState != VlessConnectionState.disconnecting &&
       !_busy &&
       !_startPending &&
       !_awaitingStartStatus &&
@@ -69,7 +69,6 @@ class VpnEngine extends ChangeNotifier {
     if (_disposed) return;
     _status = next;
     if (next.connectionState != VlessConnectionState.unknown) {
-      _stateKnown = true;
       if (_awaitingStartStatus) _awaitingStartStatus = false;
       if (_stopPending && next.connectionState == VlessConnectionState.disconnected) {
         _stopPending = false;
@@ -94,10 +93,16 @@ class VpnEngine extends ChangeNotifier {
         notificationIconResourceType: 'mipmap',
         notificationIconResourceName: 'ic_launcher',
       );
-      _coreVersion = await _client.getCoreVersion();
+      // Core-version reporting is informational. A failure here must not make
+      // an otherwise initialized VPN backend unusable.
       _initialized = true;
+      try {
+        _coreVersion = await _client.getCoreVersion();
+      } on Object {
+        _coreVersion = null;
+      }
     } catch (_) {
-      _message = 'Android VPN setup is incomplete. Generate the Android project and rebuild.';
+      _message = 'Android VPN engine could not initialize. Restart the app and try again.';
     } finally {
       _busy = false;
       _notify();

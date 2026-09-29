@@ -57,10 +57,11 @@ class _V2rayAgAppState extends State<V2rayAgApp> {
     try {
       await _languagePreferences.saveLocale(supported);
     } on Object {
+      // Keep the selected locale active even if device preferences are temporarily
+      // unavailable. A failed save must never flash back to English.
       if (!mounted) return;
-      setState(() => _locale = const Locale('en'));
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: LocalizedText('Language preference could not be saved. English has been restored.')),
+        const SnackBar(content: LocalizedText('Language changed, but may reset after restarting the app.')),
       );
     }
   }
@@ -340,10 +341,6 @@ class _VpnShellState extends State<VpnShell> {
       _showMessage('Disconnect before refreshing subscriptions.');
       return;
     }
-    if (connectFirst && !_engine.canStart) {
-      _showMessage('Android VPN is not ready yet. Wait for its status, then try again.');
-      return;
-    }
     setState(() => _subscriptionBusy = true);
     _showMessage('Fetching subscription securely…');
     try {
@@ -357,6 +354,10 @@ class _VpnShellState extends State<VpnShell> {
         _tab = connectFirst ? 0 : 1;
       });
       if (connectFirst) {
+        if (!_engine.canStart) {
+          _showMessage(_engine.message ?? 'Servers loaded; Android VPN is still preparing. Tap the power button when it is ready.');
+          return;
+        }
         final started = await _engine.connect(profiles.first);
         if (mounted && !started) {
           _showMessage(_engine.message ?? 'Android tunnel was not ready to start. Try again after status is available.');
@@ -366,8 +367,10 @@ class _VpnShellState extends State<VpnShell> {
       } else {
         _showMessage('Loaded ${profiles.length} server profiles into app memory.');
       }
-    } on FormatException {
-      if (mounted) _showMessage('Could not load this subscription. Check the HTTPS URL and supported server formats.');
+    } on FormatException catch (error) {
+      // These parser/fetch errors are fixed, credential-free messages; never
+      // surface the URL or raw HTTP/network exception in the UI.
+      if (mounted) _showMessage(error.message);
     } on Object {
       if (mounted) _showMessage('Could not load this subscription. Check the secure URL and try again.');
     } finally {
@@ -526,6 +529,7 @@ class _HomePage extends StatelessWidget {
         Center(
           child: _PowerOrb(
             reducedMotion: reducedMotion,
+            dark: dark,
             connected: engine.connected,
             enabled: profile != null &&
                 !engine.busy &&
@@ -537,7 +541,7 @@ class _HomePage extends StatelessWidget {
         Center(
           child: Column(
             children: [
-              LocalizedText(engine.stateLabel, style: TextStyle(fontSize: 12, letterSpacing: 2.1, fontWeight: FontWeight.w800, color: engine.connected ? const Color(0xFF28866A) : _ink)),
+              LocalizedText(engine.stateLabel, style: TextStyle(fontSize: 12, letterSpacing: 2.1, fontWeight: FontWeight.w800, color: engine.connected ? const Color(0xFF67DDB7) : (dark ? const Color(0xFFE0EAE6) : _ink))),
               const SizedBox(height: 5),
               LocalizedText(
                 profile == null
@@ -548,9 +552,7 @@ class _HomePage extends StatelessWidget {
                             ? 'Waiting for the Android tunnel status…'
                             : engine.disconnecting
                                 ? 'Waiting for Android to confirm disconnect…'
-                                : !engine.stateKnown && engine.initialized
-                                    ? 'Waiting for a verified VPN status before starting.'
-                                    : engine.message ?? (engine.initialized ? 'Tap to request Android VPN permission' : 'Preparing Android VPN engine…'),
+                                : engine.message ?? (engine.initialized ? 'Tap to request Android VPN permission' : 'Preparing Android VPN engine…'),
                 textAlign: TextAlign.center,
                 style: const TextStyle(fontSize: 12, color: _muted),
               ),
@@ -561,15 +563,18 @@ class _HomePage extends StatelessWidget {
         Container(
           padding: const EdgeInsets.all(16),
           decoration: BoxDecoration(
-            gradient: const LinearGradient(colors: [Color(0xFFE7F8F1), Color(0xFFF3EAFE)]),
+            gradient: LinearGradient(colors: dark
+                ? const [Color(0xFF17332D), Color(0xFF282239)]
+                : const [Color(0xFFE7F8F1), Color(0xFFF3EAFE)]),
             borderRadius: BorderRadius.circular(22),
+            border: dark ? Border.all(color: Colors.white10) : null,
           ),
           child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-            const Row(children: [
-              Icon(Icons.bolt_rounded, color: Color(0xFF25856C)),
-              SizedBox(width: 8),
-              Expanded(child: LocalizedText('Exclusive V2rayAG Subs', style: TextStyle(fontWeight: FontWeight.w800, color: _ink))),
-              Icon(Icons.lock_outline_rounded, size: 18, color: _muted),
+            Row(children: [
+              const Icon(Icons.bolt_rounded, color: Color(0xFF58D7B2)),
+              const SizedBox(width: 8),
+              Expanded(child: LocalizedText('Exclusive V2rayAG Subs', style: TextStyle(fontWeight: FontWeight.w800, color: dark ? Colors.white : _ink))),
+              const Icon(Icons.lock_outline_rounded, size: 18, color: _muted),
             ]),
             const SizedBox(height: 5),
             LocalizedText(
@@ -656,17 +661,21 @@ class _HomePage extends StatelessWidget {
         const SizedBox(height: 15),
         Container(
           padding: const EdgeInsets.symmetric(horizontal: 15, vertical: 13),
-          decoration: BoxDecoration(color: const Color(0xFFFFF1E8), borderRadius: BorderRadius.circular(17)),
-          child: const Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
-            Icon(Icons.info_outline_rounded, size: 17, color: Color(0xFFB35E49)),
-            SizedBox(width: 9),
+          decoration: BoxDecoration(
+            color: dark ? const Color(0xFF29221F) : const Color(0xFFFFF1E8),
+            border: dark ? Border.all(color: const Color(0xFF594038)) : null,
+            borderRadius: BorderRadius.circular(17),
+          ),
+          child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Icon(Icons.info_outline_rounded, size: 17, color: dark ? const Color(0xFFFFB29B) : const Color(0xFFB35E49)),
+            const SizedBox(width: 9),
             Expanded(
               child: LocalizedText(
                 'Subscription URLs are encrypted in Android secure storage and never committed to GitHub. Imported server configs stay in app memory. The app never reads or displays your device IP.',
                 style: TextStyle(
                   fontSize: 11,
                   height: 1.45,
-                  color: Color(0xFF8A5548),
+                  color: dark ? const Color(0xFFE6C7BC) : const Color(0xFF8A5548),
                 ),
               ),
             ),
@@ -683,11 +692,13 @@ class _HomePage extends StatelessWidget {
 class _PowerOrb extends StatelessWidget {
   const _PowerOrb({
     required this.reducedMotion,
+    required this.dark,
     required this.connected,
     required this.enabled,
     required this.onPressed,
   });
   final bool reducedMotion;
+  final bool dark;
   final bool connected;
   final bool enabled;
   final VoidCallback onPressed;
@@ -700,19 +711,23 @@ class _PowerOrb extends StatelessWidget {
       height: 190,
       decoration: BoxDecoration(
         shape: BoxShape.circle,
-        gradient: RadialGradient(colors: connected
-            ? const [Color(0xFFE9FFF4), Color(0xFFC9F7E1), Color(0xFFC7E7DD)]
-            : const [Color(0xFFFFF2E9), Color(0xFFFFD6C8), Color(0xFFE8D8FF)], stops: const [0, .66, 1]),
-        boxShadow: [BoxShadow(color: (connected ? _mint : _coral).withValues(alpha: .19), blurRadius: 38, spreadRadius: 2)],
+        gradient: RadialGradient(colors: dark
+            ? (connected
+                ? const [Color(0xFF235447), Color(0xFF193D35), Color(0xFF182A27)]
+                : const [Color(0xFF493B50), Color(0xFF302733), Color(0xFF1B2422)])
+            : (connected
+                ? const [Color(0xFFE9FFF4), Color(0xFFC9F7E1), Color(0xFFC7E7DD)]
+                : const [Color(0xFFFFF2E9), Color(0xFFFFD6C8), Color(0xFFE8D8FF)]), stops: const [0, .66, 1]),
+        boxShadow: [BoxShadow(color: (connected ? _mint : _coral).withValues(alpha: dark ? .10 : .19), blurRadius: 38, spreadRadius: 2)],
       ),
       child: Center(
         child: SizedBox(
           width: 126,
           height: 126,
           child: Material(
-            color: Colors.white.withValues(alpha: .94),
+            color: dark ? const Color(0xFF1D2927) : Colors.white.withValues(alpha: .94),
             shape: const CircleBorder(),
-            elevation: 8,
+            elevation: dark ? 1 : 8,
             shadowColor: (connected ? const Color(0xFF2E9478) : const Color(0xFFB65D50)).withValues(alpha: .16),
             child: InkWell(
               customBorder: const CircleBorder(),
@@ -720,7 +735,9 @@ class _PowerOrb extends StatelessWidget {
               child: Center(child: Icon(
                 Icons.power_settings_new_rounded,
                 size: 47,
-                color: enabled ? (connected ? const Color(0xFF28866A) : const Color(0xFFCB7767)) : Colors.grey,
+                color: enabled
+                    ? (connected ? const Color(0xFF67DDB7) : const Color(0xFFFF9B82))
+                    : (dark ? const Color(0xFF899691) : Colors.grey),
               )), 
             ),
           ),
@@ -778,15 +795,18 @@ class _ProfilesPage extends StatelessWidget {
       Container(
         padding: const EdgeInsets.all(16),
         decoration: BoxDecoration(
-          gradient: const LinearGradient(colors: [Color(0xFFE7F8F1), Color(0xFFF3EAFE)]),
+          gradient: LinearGradient(colors: dark
+              ? const [Color(0xFF17332D), Color(0xFF282239)]
+              : const [Color(0xFFE7F8F1), Color(0xFFF3EAFE)]),
           borderRadius: BorderRadius.circular(22),
+          border: dark ? Border.all(color: Colors.white10) : null,
         ),
         child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          const Row(children: [
-            Icon(Icons.bolt_rounded, color: Color(0xFF25856C)),
-            SizedBox(width: 8),
-            Expanded(child: LocalizedText('Exclusive V2rayAG Subs', style: TextStyle(fontWeight: FontWeight.w800))),
-            Icon(Icons.lock_outline_rounded, size: 18, color: _muted),
+          Row(children: [
+            const Icon(Icons.bolt_rounded, color: Color(0xFF58D7B2)),
+            const SizedBox(width: 8),
+            Expanded(child: LocalizedText('Exclusive V2rayAG Subs', style: TextStyle(fontWeight: FontWeight.w800, color: dark ? Colors.white : _ink))),
+            const Icon(Icons.lock_outline_rounded, size: 18, color: _muted),
           ]),
           const SizedBox(height: 5),
           LocalizedText(
@@ -827,7 +847,7 @@ class _ProfilesPage extends StatelessWidget {
           elevation: 0,
           color: dark ? const Color(0xFF192321) : Colors.white,
           child: ListTile(
-            leading: const CircleAvatar(backgroundColor: Color(0xFFE5F6EF), child: Icon(Icons.rss_feed_rounded, color: Color(0xFF317D68))),
+            leading: CircleAvatar(backgroundColor: dark ? const Color(0xFF213B34) : const Color(0xFFE5F6EF), child: Icon(Icons.rss_feed_rounded, color: dark ? const Color(0xFF7AD9B7) : const Color(0xFF317D68))),
             title: Text(subscription.name, maxLines: 1, overflow: TextOverflow.ellipsis),
             subtitle: const LocalizedText('Private URL stored on this device'),
             trailing: Wrap(spacing: 0, children: [
@@ -852,11 +872,11 @@ class _ProfilesPage extends StatelessWidget {
             color: dark ? const Color(0xFF192321) : Colors.white,
             shape: RoundedRectangleBorder(
               borderRadius: BorderRadius.circular(20),
-              side: BorderSide(color: active ? const Color(0xFF52C59E) : Colors.black12, width: active ? 1.5 : 1),
+              side: BorderSide(color: active ? const Color(0xFF52C59E) : (dark ? Colors.white12 : Colors.black12), width: active ? 1.5 : 1),
             ),
             child: ListTile(
               onTap: () => onSelect(index),
-              leading: CircleAvatar(backgroundColor: const Color(0xFFE5F6EF), child: Text(profile.protocol.substring(0, 1), style: const TextStyle(color: Color(0xFF317D68), fontWeight: FontWeight.w800))),
+              leading: CircleAvatar(backgroundColor: dark ? const Color(0xFF213B34) : const Color(0xFFE5F6EF), child: Text(profile.protocol.substring(0, 1), style: TextStyle(color: dark ? const Color(0xFF7AD9B7) : const Color(0xFF317D68), fontWeight: FontWeight.w800))),
               title: Text(profile.name, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontWeight: FontWeight.w700)),
               subtitle: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
@@ -948,11 +968,15 @@ class _SettingsPage extends StatelessWidget {
         const SizedBox(height: 16),
         Container(
           padding: const EdgeInsets.all(16),
-          decoration: BoxDecoration(color: const Color(0xFFFFF1E8), borderRadius: BorderRadius.circular(20)),
-          child: const Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-            LocalizedText('Platform scope', style: TextStyle(fontWeight: FontWeight.w800, color: Color(0xFF8A5548))),
-            SizedBox(height: 8),
-            LocalizedText('The Android tunnel uses the native Xray-backed VPN service. iPhone still needs its Network Extension project, Apple signing, and device testing. DNS policy, kill switch, auto-connect, and trusted country lookup are not enabled in this build.', style: TextStyle(fontSize: 12, height: 1.5, color: Color(0xFF8A5548))),
+          decoration: BoxDecoration(
+            color: Theme.of(context).brightness == Brightness.dark ? const Color(0xFF29221F) : const Color(0xFFFFF1E8),
+            border: Theme.of(context).brightness == Brightness.dark ? Border.all(color: const Color(0xFF594038)) : null,
+            borderRadius: BorderRadius.circular(20),
+          ),
+          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            LocalizedText('Platform scope', style: TextStyle(fontWeight: FontWeight.w800, color: Theme.of(context).brightness == Brightness.dark ? const Color(0xFFFFB29B) : const Color(0xFF8A5548))),
+            const SizedBox(height: 8),
+            LocalizedText('The Android tunnel uses the native Xray-backed VPN service. iPhone still needs its Network Extension project, Apple signing, and device testing. DNS policy, kill switch, auto-connect, and trusted country lookup are not enabled in this build.', style: TextStyle(fontSize: 12, height: 1.5, color: Theme.of(context).brightness == Brightness.dark ? const Color(0xFFE6C7BC) : const Color(0xFF8A5548))),
           ]),
         ),
         const SizedBox(height: 20),
@@ -1110,7 +1134,7 @@ class _SubscriptionEditorSheetState extends State<_SubscriptionEditorSheet> {
             const SizedBox(height: 14),
             TextField(
               controller: _nameController,
-              decoration: InputDecoration(labelText: context.tr('Name'), filled: true, fillColor: const Color(0xFFF4F6F3), border: OutlineInputBorder(borderRadius: BorderRadius.circular(15), borderSide: BorderSide.none)),
+              decoration: InputDecoration(labelText: context.tr('Name'), filled: true, fillColor: Theme.of(context).brightness == Brightness.dark ? const Color(0xFF101817) : const Color(0xFFF4F6F3), border: OutlineInputBorder(borderRadius: BorderRadius.circular(15), borderSide: BorderSide.none)),
             ),
           ],
           const SizedBox(height: 12),
@@ -1173,8 +1197,14 @@ class _ImportSheetState extends State<_ImportSheet> {
   }
 
   void _preview() {
+    final input = _controller.text.trim();
+    final scheme = Uri.tryParse(input)?.scheme.toLowerCase();
+    if (scheme == 'http' || scheme == 'https') {
+      setState(() => _error = 'That is a subscription URL, not a single server link. Open Servers and choose Add subscription.');
+      return;
+    }
     try {
-      final profile = VpnProfile.fromShareLink(_controller.text);
+      final profile = VpnProfile.fromShareLink(input);
       _controller.clear();
       Navigator.of(context).pop(profile);
     } on FormatException catch (error) {

@@ -29,7 +29,8 @@ class SavedSubscription {
 /// storage; never log or include them in UI errors, analytics, or repository files.
 class SubscriptionRepository {
   SubscriptionRepository({FlutterSecureStorage? storage})
-      : _storage = storage ?? const FlutterSecureStorage();
+      : _storage = storage ??
+            FlutterSecureStorage(aOptions: AndroidOptions());
 
   static const _key = 'saved_subscriptions_v1';
   final FlutterSecureStorage _storage;
@@ -122,13 +123,19 @@ class SubscriptionService {
 
   static Uri validateSubscriptionUrl(String rawUrl) {
     final uri = Uri.tryParse(rawUrl.trim());
-    if (uri == null ||
-        uri.scheme.toLowerCase() != 'https' ||
-        uri.host.isEmpty ||
-        uri.userInfo.isNotEmpty ||
-        uri.hasFragment) {
+    if (uri == null || uri.scheme.toLowerCase() != 'https' || uri.host.isEmpty) {
       throw const FormatException(
-        'Enter a direct HTTPS subscription URL (without embedded username/password or a fragment).',
+        'Enter a valid direct HTTPS subscription URL.',
+      );
+    }
+    if (uri.userInfo.isNotEmpty) {
+      throw const FormatException(
+        'Remove the username or password from the URL authority; use the provider-issued subscription link.',
+      );
+    }
+    if (uri.hasFragment) {
+      throw const FormatException(
+        'Remove the #fragment from the subscription URL; it is not sent to the provider.',
       );
     }
     return uri;

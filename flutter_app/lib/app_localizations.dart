@@ -168,6 +168,7 @@ class V2rayLocalizations {
     'Disconnect before changing subscriptions.': 'پیش از تغییر اشتراک‌ها، اتصال را قطع کنید.',
     'Disconnect the current route with the power button before switching subscriptions.': 'پیش از جابه‌جایی بین اشتراک‌ها، مسیر فعلی را با دکمهٔ روشن/خاموش قطع کنید.',
     'Android VPN is not ready yet. Wait for its status, then try again.': 'VPN در Android هنوز آماده نیست. منتظر وضعیت آن بمانید و دوباره تلاش کنید.',
+    'Servers loaded; Android VPN is still preparing. Tap the power button when it is ready.': 'سرورها بارگیری شدند؛ VPN در Android هنوز آماده می‌شود. پس از آماده‌شدن، دکمهٔ روشن/خاموش را بزنید.',
     'Could not save this subscription securely on the device.': 'ذخیرهٔ امن این اشتراک در دستگاه ممکن نشد.',
     'Could not save the subscription securely on this device.': 'ذخیرهٔ امن اشتراک در این دستگاه ممکن نشد.',
     'Could not remove the saved subscription.': 'حذف اشتراک ذخیره‌شده ممکن نشد.',
@@ -182,9 +183,15 @@ class V2rayLocalizations {
     'The route did not return a latency result.': 'مسیر نتیجه‌ای برای تأخیر برنگرداند.',
     'Latency check failed. Try again when the server is reachable.': 'آزمایش تأخیر ناموفق بود. وقتی سرور در دسترس است دوباره تلاش کنید.',
     'Language preference could not be saved. English has been restored.': 'ذخیرهٔ زبان انتخاب‌شده ممکن نشد. زبان English بازگردانده شد.',
+    'Language changed, but may reset after restarting the app.': 'زبان تغییر کرد، اما ممکن است پس از راه‌اندازی دوبارهٔ برنامه بازنشانی شود.',
+    'Android VPN engine could not initialize. Restart the app and try again.': 'موتور VPN در Android راه‌اندازی نشد. برنامه را دوباره باز کنید و تلاش کنید.',
+    'That is a subscription URL, not a single server link. Open Servers and choose Add subscription.': 'این نشانی اشتراک است، نه پیوند یک سرور. به بخش سرورها بروید و «افزودن اشتراک» را انتخاب کنید.',
 
     // Safe parser/fetch validation errors. Inputs and credentials are never echoed.
     'Enter a direct HTTPS subscription URL (without embedded username/password or a fragment).': 'یک نشانی مستقیم HTTPS وارد کنید (بدون نام کاربری/گذرواژهٔ درون نشانی یا بخش fragment).',
+    'Enter a valid direct HTTPS subscription URL.': 'یک نشانی معتبر مستقیم برای اشتراک با HTTPS وارد کنید.',
+    'Remove the username or password from the URL authority; use the provider-issued subscription link.': 'نام کاربری یا گذرواژه را از بخش اصلی نشانی حذف کنید و از پیوند اشتراکی که ارائه‌دهنده داده استفاده کنید.',
+    'Remove the #fragment from the subscription URL; it is not sent to the provider.': 'بخش پس از # را از نشانی اشتراک حذف کنید؛ این بخش برای ارائه‌دهنده فرستاده نمی‌شود.',
     'This subscription redirects to another address. Ask the provider for its direct HTTPS subscription URL.': 'این اشتراک به نشانی دیگری هدایت می‌شود. نشانی مستقیم HTTPS را از ارائه‌دهنده بخواهید.',
     'The subscription server did not return a usable response. Check the URL and try again.': 'سرور اشتراک پاسخ قابل استفاده‌ای نداد. نشانی را بررسی و دوباره تلاش کنید.',
     'The subscription response is too large to import safely.': 'پاسخ اشتراک برای وارد کردن امن بیش از حد بزرگ است.',
