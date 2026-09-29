@@ -258,6 +258,15 @@ jobs:
           cp build/app/outputs/flutter-apk/app-release.apk \
             "$RUNNER_TEMP/v2rayag-apk/V2rayAG-${{ matrix.name }}.apk"
 
+      - name: Upload CI APK artifact (unsigned preview)
+        if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: V2rayAG-${{ matrix.name }}-preview
+          path: ${{ runner.temp }}/v2rayag-apk/V2rayAG-${{ matrix.name }}.apk
+          if-no-files-found: error
+          retention-days: 7
+
       - name: Build signed Google Play bundle
         if: startsWith(github.ref, 'refs/tags/v') && matrix.name == 'universal'
         env:
