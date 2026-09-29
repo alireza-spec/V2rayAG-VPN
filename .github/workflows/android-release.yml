@@ -60,6 +60,9 @@ jobs:
       - name: Generate Android project files
         run: flutter create --platforms=android --project-name=v2rayag_vpn .
 
+      - name: Remove generated placeholder widget test
+        run: rm -f test/widget_test.dart
+
       - name: Resolve dependencies
         run: flutter pub get
 

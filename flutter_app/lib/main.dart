@@ -403,8 +403,16 @@ class _HomePage extends StatelessWidget {
           child: const Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
             Icon(Icons.info_outline_rounded, size: 17, color: Color(0xFFB35E49)),
             SizedBox(width: 9),
-            Expanded(child: Text('Server configs stay in app memory and are passed to the native Android engine for a tunnel. iPhone and subscription-URL import are not configured yet.',
-                style: TextStyle(fontSize: 11, height: 1.45, color: Color(0xFF8A5548))), 
+            Expanded(
+              child: Text(
+                'Server configs stay in app memory and are passed to the native Android engine for a tunnel. iPhone and subscription-URL import are not configured yet.',
+                style: TextStyle(
+                  fontSize: 11,
+                  height: 1.45,
+                  color: Color(0xFF8A5548),
+                ),
+              ),
+            ),
           ]),
         ),
         const SizedBox(height: 23),
