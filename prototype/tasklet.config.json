@@ -1,0 +1,6 @@
+{
+  "name": "v2rayag-vpn",
+  "displayName": "V2rayAG VPN",
+  "description": "Responsive VPN client prototype with server selection, subscription management, ping status, connection states, notifications, and settings.",
+  "instantAppType": "tsx"
+}
