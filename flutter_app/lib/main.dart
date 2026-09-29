@@ -246,9 +246,11 @@ class _VpnShellState extends State<VpnShell> {
     try {
       final preferences = await SharedPreferences.getInstance();
       final stored = preferences.getStringList(_excludedPackagesKey) ?? const [];
-      if (mounted) setState(() => _excludedPackages
-        ..clear()
-        ..addAll(stored));
+      if (mounted) {
+        setState(() => _excludedPackages
+          ..clear()
+          ..addAll(stored));
+      }
     } on Object {
       // Routing preferences are optional; default to routing all apps through VPN.
     } finally {
@@ -294,6 +296,7 @@ class _VpnShellState extends State<VpnShell> {
       return;
     }
 
+    if (!mounted) return;
     final selected = Set<String>.of(_excludedPackages);
     final result = await showDialog<Set<String>>(
       context: context,
