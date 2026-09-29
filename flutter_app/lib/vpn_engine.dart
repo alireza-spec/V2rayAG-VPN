@@ -63,8 +63,9 @@ class VpnEngine extends ChangeNotifier {
   int get sessionUploadBytes => _sessionUpload;
   int get sessionDownloadBytes => _sessionDownload;
 
-  Duration get connectedDuration =>
-      connected && _sessionClock != null ? _sessionClock!.elapsed : _lastSessionDuration;
+  Duration get connectedDuration => connected && _sessionClock != null
+      ? _lastSessionDuration + _sessionClock!.elapsed
+      : _lastSessionDuration;
   bool get hasSessionData => _hasSessionData;
 
   bool get connected => _status.connectionState == VlessConnectionState.connected;
@@ -135,8 +136,11 @@ class VpnEngine extends ChangeNotifier {
 
   void _beginSession(VlessStatus next) {
     _sessionClock?.stop();
+    // Native status includes the true service-side elapsed time. Use it as the
+    // baseline when the Dart process is recreated while Android keeps the VPN
+    // service alive, then continue measuring locally from that point.
+    _lastSessionDuration = Duration(seconds: next.duration < 0 ? 0 : next.duration);
     _sessionClock = Stopwatch()..start();
-    _lastSessionDuration = Duration.zero;
     _hasSessionData = true;
     _sessionUpload = 0;
     _sessionDownload = 0;
@@ -151,7 +155,7 @@ class VpnEngine extends ChangeNotifier {
     final clock = _sessionClock;
     if (clock != null) {
       clock.stop();
-      _lastSessionDuration = clock.elapsed;
+      _lastSessionDuration += clock.elapsed;
       _sessionClock = null;
     }
     _sessionTicker?.cancel();
@@ -461,7 +465,10 @@ class VpnEngine extends ChangeNotifier {
   }
 
   Future<bool> disconnect() async {
-    if (!_initialized || _busy || (!connected && !connecting && !disconnecting)) {
+    // An Android foreground VPN session can outlive/restart the Flutter
+    // activity. If native status says it is active, still issue stop even when
+    // this Dart engine did not complete its fresh initialization sequence.
+    if (_busy || (!connected && !connecting && !disconnecting)) {
       return false;
     }
     _busy = true;

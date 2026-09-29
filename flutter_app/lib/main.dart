@@ -216,6 +216,7 @@ class _VpnShellState extends State<VpnShell> {
   bool _profileRestoreFailed = false;
   String? _profileStorageErrorCode;
   bool _subscriptionRestoreFailed = false;
+  final Set<String> _sessionOnlySubscriptionIds = {};
   List<SavedSubscription> _savedSubscriptions = [];
   bool _subscriptionBusy = false;
   int? _selectedIndex;
@@ -338,6 +339,59 @@ class _VpnShellState extends State<VpnShell> {
         );
       }
       return false;
+    }
+  }
+
+  Future<void> _recoverUnreadableSecureStorage() async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const LocalizedText('Repair secure storage?'),
+        content: const LocalizedText(
+          'Android cannot decrypt some saved app data. You can keep it and cancel, or delete only the unreadable subscription/profile records. Deleted records cannot be recovered; you may need to add those subscriptions and profiles again. Other app data is not affected.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(false),
+            child: const LocalizedText('Keep data'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(dialogContext).pop(true),
+            child: const LocalizedText('Delete unreadable records'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+    try {
+      if (_subscriptionRestoreFailed) {
+        await _subscriptionRepository.deleteSaved();
+      }
+      if (_profileRestoreFailed) {
+        await _profileRepository.deleteSaved();
+      }
+      if (!mounted) return;
+      setState(() {
+        if (_subscriptionRestoreFailed) {
+          _savedSubscriptions.clear();
+          _sessionOnlySubscriptionIds.clear();
+          _subscriptionRestoreFailed = false;
+        }
+        if (_profileRestoreFailed) {
+          _profiles.clear();
+          _profileSources.clear();
+          _selectedIndex = null;
+          _profilePings.clear();
+          _profilePingFailures.clear();
+          _failedPings.clear();
+          _probingProfiles.clear();
+          _profileRestoreFailed = false;
+          _profileStorageErrorCode = null;
+        }
+      });
+      _showMessage('Unreadable saved records were removed. You can add servers again.');
+    } on Object catch (error) {
+      _showMessage('Secure storage repair failed (${_safeStorageFailure(error)}). Try again; some unreadable records may already have been removed.');
     }
   }
 
@@ -734,12 +788,45 @@ class _VpnShellState extends State<VpnShell> {
     );
   }
 
+  void _rememberSessionOnlySubscription(SavedSubscription subscription) {
+    setState(() {
+      final index = _savedSubscriptions.indexWhere((item) => item.id == subscription.id);
+      if (index < 0) {
+        _savedSubscriptions.add(subscription);
+      } else {
+        _savedSubscriptions[index] = subscription;
+      }
+      _sessionOnlySubscriptionIds.add(subscription.id);
+    });
+  }
+
   Future<_SubscriptionSaveChoice> _saveSubscription(
     SavedSubscription subscription,
   ) async {
     if (_subscriptionRestoreFailed) {
-      _showMessage('Subscription storage could not be read; refusing to overwrite its existing data.');
-      return _SubscriptionSaveChoice.cancelled;
+      if (!mounted) return _SubscriptionSaveChoice.cancelled;
+      final useOnce = await showDialog<bool>(
+        context: context,
+        builder: (dialogContext) => AlertDialog(
+          title: const LocalizedText('Secure storage is unreadable'),
+          content: const LocalizedText(
+            'The app will not replace data it cannot read. You can repair storage in Servers, or use this subscription for this session only. It will not be saved and will disappear when the app closes.',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(dialogContext).pop(false),
+              child: const LocalizedText('Cancel'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.of(dialogContext).pop(true),
+              child: const LocalizedText('Use once'),
+            ),
+          ],
+        ),
+      );
+      if (useOnce != true || !mounted) return _SubscriptionSaveChoice.cancelled;
+      _rememberSessionOnlySubscription(subscription);
+      return _SubscriptionSaveChoice.useOnce;
     }
     final next = [..._savedSubscriptions];
     final index = next.indexWhere((item) => item.id == subscription.id);
@@ -773,9 +860,11 @@ class _VpnShellState extends State<VpnShell> {
           ],
         ),
       );
-      return useOnce == true
-          ? _SubscriptionSaveChoice.useOnce
-          : _SubscriptionSaveChoice.cancelled;
+      if (useOnce != true || !mounted) {
+        return _SubscriptionSaveChoice.cancelled;
+      }
+      _rememberSessionOnlySubscription(subscription);
+      return _SubscriptionSaveChoice.useOnce;
     }
   }
 
@@ -814,8 +903,9 @@ class _VpnShellState extends State<VpnShell> {
     await _subscriptionsReady.future;
     await _profilesReady.future;
     if (!mounted) return;
-    if (_subscriptionRestoreFailed) {
-      _showMessage('Subscription storage could not be read; refusing to overwrite its existing data.');
+    final sessionOnly = _sessionOnlySubscriptionIds.contains(subscription.id);
+    if (_subscriptionRestoreFailed && !sessionOnly) {
+      _showMessage('Subscription storage could not be read; repair it before changing saved subscriptions.');
       return;
     }
     final next = _savedSubscriptions.where((item) => item.id != subscription.id).toList();
@@ -823,10 +913,13 @@ class _VpnShellState extends State<VpnShell> {
         ? _profiles[_selectedIndex!].config
         : null;
     try {
-      await _subscriptionRepository.saveAll(next);
+      if (!_subscriptionRestoreFailed) {
+        await _subscriptionRepository.saveAll(next);
+      }
       if (!mounted) return;
       setState(() {
         _savedSubscriptions = next;
+        _sessionOnlySubscriptionIds.remove(subscription.id);
         final retained = <VpnProfile>[];
         final retainedSources = <String?>[];
         for (var i = 0; i < _profiles.length; i++) {
@@ -990,6 +1083,8 @@ class _VpnShellState extends State<VpnShell> {
         pingBatchCompleted: _batchPingCompleted,
         pingBatchTotal: _batchPingTotal,
         subscriptionBusy: _subscriptionBusy,
+        secureStorageNeedsRepair: _subscriptionRestoreFailed || _profileRestoreFailed,
+        onRepairSecureStorage: _recoverUnreadableSecureStorage,
       ),
       _SettingsPage(
         locale: widget.locale,
@@ -1431,6 +1526,8 @@ class _ProfilesPage extends StatelessWidget {
     required this.pingBatchCompleted,
     required this.pingBatchTotal,
     required this.subscriptionBusy,
+    required this.secureStorageNeedsRepair,
+    required this.onRepairSecureStorage,
   });
 
   final List<VpnProfile> profiles;
@@ -1457,6 +1554,8 @@ class _ProfilesPage extends StatelessWidget {
   final int pingBatchCompleted;
   final int pingBatchTotal;
   final bool subscriptionBusy;
+  final bool secureStorageNeedsRepair;
+  final VoidCallback onRepairSecureStorage;
 
   Widget _profileCard(BuildContext context, int index, bool dark) {
     final profile = profiles[index];
@@ -1540,6 +1639,20 @@ class _ProfilesPage extends StatelessWidget {
         const Expanded(child: LocalizedText('My subscriptions', style: TextStyle(fontSize: 17, fontWeight: FontWeight.w800))),
         TextButton.icon(onPressed: connected || subscriptionBusy ? null : onAddSubscription, icon: const Icon(Icons.add_rounded), label: const LocalizedText('Add')),
       ]),
+      if (secureStorageNeedsRepair)
+        Card(
+          color: dark ? const Color(0xFF3A2C1D) : const Color(0xFFFFF1E5),
+          child: ListTile(
+            leading: const Icon(Icons.warning_amber_rounded, color: _coral),
+            title: const LocalizedText('Saved data cannot be decrypted'),
+            subtitle: const LocalizedText('New subscriptions can be used for one session, or repair storage after confirming removal of unreadable records.'),
+            trailing: IconButton(
+              tooltip: context.tr('Repair secure storage'),
+              onPressed: subscriptionBusy ? null : onRepairSecureStorage,
+              icon: const Icon(Icons.build_circle_outlined),
+            ),
+          ),
+        ),
       if (customSubscriptions.isEmpty)
         const Padding(
           padding: EdgeInsets.only(bottom: 8),

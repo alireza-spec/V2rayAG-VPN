@@ -63,6 +63,10 @@ class SubscriptionRepository {
         key: _key,
         value: jsonEncode(subscriptions.map((item) => item.toJson()).toList()),
       );
+
+  /// Explicit recovery only: remove this app's unreadable subscription record
+  /// after the user confirms data loss. Never clear the whole secure store.
+  Future<void> deleteSaved() => _storage.delete(key: _key);
 }
 
 /// Profiles include credentials, so this repository uses the same encrypted
@@ -153,6 +157,10 @@ class ProfileRepository {
     });
     await _storage.write(key: _key, value: value);
   }
+
+  /// Explicit recovery only: remove this app's unreadable profile record after
+  /// the user confirms that inaccessible saved profiles may be discarded.
+  Future<void> deleteSaved() => _storage.delete(key: _key);
 }
 
 class SubscriptionService {
