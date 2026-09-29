@@ -85,7 +85,7 @@ class SubscriptionService {
         if (!response.isRedirect) break;
 
         final location = response.headers.value(HttpHeaders.locationHeader);
-        await response.drain<void>();
+        await response.drain<void>().timeout(const Duration(seconds: 5));
         if (location == null || redirects == 3) {
           throw const FormatException(
             'The subscription has too many or incomplete redirects. Ask the provider for its direct HTTPS URL.',

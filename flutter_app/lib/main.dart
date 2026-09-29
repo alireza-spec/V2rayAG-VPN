@@ -206,8 +206,12 @@ class _VpnShellState extends State<VpnShell> {
   final List<VpnProfile> _profiles = [];
   final VpnEngine _engine = VpnEngine();
   final SubscriptionRepository _subscriptionRepository = SubscriptionRepository();
+  final Completer<void> _subscriptionsReady = Completer<void>();
+  final Completer<void> _routingPreferencesReady = Completer<void>();
   List<SavedSubscription> _savedSubscriptions = [];
   bool _subscriptionBusy = false;
+  bool _autoConnectActive = false;
+  bool _cancelAutoConnect = false;
   int? _selectedIndex;
   final Map<int, int> _profilePings = {};
   final Set<int> _probingProfiles = {};
@@ -233,6 +237,8 @@ class _VpnShellState extends State<VpnShell> {
       if (mounted) setState(() => _savedSubscriptions = saved);
     } on Object {
       if (mounted) _showMessage('Secure subscription storage is unavailable on this device.');
+    } finally {
+      if (!_subscriptionsReady.isCompleted) _subscriptionsReady.complete();
     }
   }
 
@@ -245,6 +251,10 @@ class _VpnShellState extends State<VpnShell> {
         ..addAll(stored));
     } on Object {
       // Routing preferences are optional; default to routing all apps through VPN.
+    } finally {
+      if (!_routingPreferencesReady.isCompleted) {
+        _routingPreferencesReady.complete();
+      }
     }
   }
 
@@ -254,6 +264,8 @@ class _VpnShellState extends State<VpnShell> {
       _showMessage('Disconnect before changing app routing.');
       return;
     }
+    await _routingPreferencesReady.future;
+    if (!mounted) return;
 
     List<dynamic> rawApps;
     try {
@@ -369,7 +381,9 @@ class _VpnShellState extends State<VpnShell> {
   }
 
   Future<void> _toggleConnection() async {
-    if (_subscriptionBusy) {
+    final isActive = _engine.connected || _engine.connecting || _engine.disconnecting;
+    final canCancelAutoConnect = _subscriptionBusy && _autoConnectActive && isActive;
+    if (_subscriptionBusy && !canCancelAutoConnect) {
       _showMessage('Wait for the subscription operation to finish.');
       return;
     }
@@ -378,7 +392,8 @@ class _VpnShellState extends State<VpnShell> {
       _showMessage('Import a server link first.');
       return;
     }
-    if (_engine.connected || _engine.connecting || _engine.disconnecting) {
+    if (isActive) {
+      if (canCancelAutoConnect) setState(() => _cancelAutoConnect = true);
       await _engine.disconnect();
     } else {
       await _engine.connect(
@@ -565,6 +580,8 @@ class _VpnShellState extends State<VpnShell> {
 
   Future<void> _addSubscription() async {
     if (_subscriptionBusy) return;
+    await _subscriptionsReady.future;
+    if (!mounted) return;
     if (_engine.connected || _engine.connecting || _engine.disconnecting) {
       _showMessage('Disconnect before refreshing subscriptions.');
       return;
@@ -578,6 +595,8 @@ class _VpnShellState extends State<VpnShell> {
 
   Future<void> _editSavedSubscription(SavedSubscription existing) async {
     if (_subscriptionBusy) return;
+    await _subscriptionsReady.future;
+    if (!mounted) return;
     if (_engine.connected || _engine.connecting || _engine.disconnecting) {
       _showMessage('Disconnect before changing subscriptions.');
       return;
@@ -594,6 +613,8 @@ class _VpnShellState extends State<VpnShell> {
 
   Future<void> _removeSubscription(SavedSubscription subscription) async {
     if (_subscriptionBusy || _engine.connected || _engine.connecting || _engine.disconnecting) return;
+    await _subscriptionsReady.future;
+    if (!mounted) return;
     final next = _savedSubscriptions.where((item) => item.id != subscription.id).toList();
     try {
       await _subscriptionRepository.saveAll(next);
@@ -606,6 +627,8 @@ class _VpnShellState extends State<VpnShell> {
 
   Future<void> _connectExclusiveSubscription() async {
     if (_subscriptionBusy) return;
+    await _subscriptionsReady.future;
+    if (!mounted) return;
     if (_engine.connected || _engine.connecting || _engine.disconnecting) {
       _showMessage('Disconnect the current route with the power button before switching subscriptions.');
       return;
@@ -649,6 +672,8 @@ class _VpnShellState extends State<VpnShell> {
         _probingProfiles.clear();
         _selectedIndex = 0;
         _tab = connectFirst ? 0 : 1;
+        _autoConnectActive = connectFirst;
+        _cancelAutoConnect = false;
       });
       if (connectFirst) {
         if (!_engine.canStart) {
@@ -664,13 +689,14 @@ class _VpnShellState extends State<VpnShell> {
         var rejectedConfiguration = false;
         var routeHealthFailed = false;
         for (var index = 0; index < attemptCount; index++) {
-          if (!mounted) return;
+          if (!mounted || _cancelAutoConnect) break;
           setState(() => _selectedIndex = index);
           final started = await _engine.connect(
             profiles[index],
             blockedApps: _excludedPackages.toList(growable: false),
           );
           if (!mounted) return;
+          if (_cancelAutoConnect) break;
           if (started) {
             if (index > 0) {
               _showMessage('Exclusive subscription connected using a backup server.');
@@ -701,6 +727,14 @@ class _VpnShellState extends State<VpnShell> {
         }
 
         if (!mounted) return;
+        if (_cancelAutoConnect) {
+          final stillActive =
+              _engine.connected || _engine.connecting || _engine.disconnecting;
+          _showMessage(stillActive
+              ? (_engine.message ?? 'Android has not confirmed disconnect yet. Retry disconnect before starting another route.')
+              : 'Automatic connection was cancelled.');
+          return;
+        }
         _showMessage(routeHealthFailed
             ? 'No subscription server passed the live network check. Try another network or refresh the server list.'
             : rejectedConfiguration
@@ -716,7 +750,12 @@ class _VpnShellState extends State<VpnShell> {
     } on Object {
       if (mounted) _showMessage('Could not load this subscription. Check the secure URL and try again.');
     } finally {
-      if (mounted) setState(() => _subscriptionBusy = false);
+      if (mounted) {
+        setState(() {
+          _subscriptionBusy = false;
+          _autoConnectActive = false;
+        });
+      }
     }
   }
 
@@ -867,6 +906,7 @@ class _HomePage extends StatelessWidget {
   Widget build(BuildContext context) {
     final dark = Theme.of(context).brightness == Brightness.dark;
     final card = dark ? const Color(0xFF192321) : Colors.white;
+    final activeOrPending = engine.connected || engine.connecting || engine.disconnecting;
     return ListView(
       padding: const EdgeInsets.fromLTRB(20, 16, 20, 30),
       children: [
@@ -888,7 +928,7 @@ class _HomePage extends StatelessWidget {
             disconnecting: engine.disconnecting,
             failed: engine.message != null && !engine.connected && !engine.connecting,
             enabled: profile != null &&
-                !subscriptionBusy &&
+                (!subscriptionBusy || activeOrPending) &&
                 !engine.busy &&
                 (engine.canStart || engine.connected || engine.connecting || engine.disconnecting),
             onPressed: onToggleConnection,

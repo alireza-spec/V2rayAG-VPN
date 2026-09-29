@@ -212,6 +212,7 @@ class V2rayLocalizations {
     'Server profile added to this session memory.': 'نمایهٔ سرور به حافظهٔ این نشست افزوده شد.',
     'Fetching subscription securely…': 'در حال دریافت امن اشتراک…',
     'Wait for the subscription operation to finish.': 'تا پایان عملیات اشتراک صبر کنید.',
+    'Automatic connection was cancelled.': 'اتصال خودکار لغو شد.',
     'Android tunnel was not ready to start. Try again after status is available.': 'تونل Android برای شروع آماده نبود. پس از نمایش وضعیت دوباره تلاش کنید.',
     'Disconnect before changing the active server.': 'پیش از تغییر سرور فعال، اتصال را قطع کنید.',
     'Disconnect before importing another server.': 'پیش از وارد کردن سرور دیگر، اتصال را قطع کنید.',

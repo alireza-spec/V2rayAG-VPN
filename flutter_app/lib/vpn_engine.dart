@@ -35,6 +35,8 @@ class VpnEngine extends ChangeNotifier {
   bool _startPending = false;
   bool _awaitingStartStatus = false;
   bool _stopPending = false;
+  bool _ignoreConnectedUntilDisconnected = false;
+  int _statusRevision = 0;
   bool _disposed = false;
   String? _message;
   String? _coreVersion;
@@ -84,7 +86,8 @@ class VpnEngine extends ChangeNotifier {
       !_busy &&
       !_startPending &&
       !_awaitingStartStatus &&
-      !_stopPending;
+      !_stopPending &&
+      !_ignoreConnectedUntilDisconnected;
 
   String get stateLabel {
     if (disconnecting) return 'DISCONNECTING';
@@ -174,6 +177,13 @@ class VpnEngine extends ChangeNotifier {
 
   void _onStatus(VlessStatus next) {
     if (_disposed) return;
+    // A late callback from a worker we explicitly stopped must not resurrect
+    // the UI or confirm a different connection attempt.
+    if (next.connectionState == VlessConnectionState.connected &&
+        _ignoreConnectedUntilDisconnected) {
+      return;
+    }
+    _statusRevision++;
     final previous = _status.connectionState;
     final wasConnected = previous == VlessConnectionState.connected;
     _status = next;
@@ -201,6 +211,7 @@ class VpnEngine extends ChangeNotifier {
         _phase = 'disconnecting';
         break;
       case VlessConnectionState.disconnected:
+        _ignoreConnectedUntilDisconnected = false;
         _endSession();
         if (_stopPending) {
           _stopPending = false;
@@ -282,6 +293,8 @@ class VpnEngine extends ChangeNotifier {
     _connectResult = result;
     _notify();
     var ownsBusy = true;
+    var nativeStartAttempted = false;
+    _ignoreConnectedUntilDisconnected = false;
     try {
       final permitted = await _client.requestPermission();
       if (!permitted) {
@@ -292,6 +305,7 @@ class VpnEngine extends ChangeNotifier {
       }
       _awaitingStartStatus = true;
       _phase = 'native-start';
+      nativeStartAttempted = true;
       await _client.startVless(
         remark: profile.name,
         config: profile.config,
@@ -386,12 +400,15 @@ class VpnEngine extends ChangeNotifier {
               ? 'Android did not finish accepting the connection request in time.'
               : 'Could not start this route. Open connection details to inspect a safe diagnostic.';
       _completeConnect(false);
-      // Never convert a failed native start into success merely because a
-      // delayed/stale status callback still says CONNECTED. Reconcile native
-      // state before allowing subscription failover or another start.
-      if (connected ||
-          _status.connectionState == VlessConnectionState.connecting ||
-          timedOut) {
+      // A validator rejection while already disconnected is guaranteed to
+      // happen before native session mutation, so it is safe to try another
+      // profile without issuing a stop. Every other attempted start is
+      // reconciled with a stop before retrying or allowing a new manual start.
+      if (nativeStartAttempted && invalidConfig &&
+          _status.connectionState == VlessConnectionState.disconnected) {
+        _ignoreConnectedUntilDisconnected = false;
+      } else if (nativeStartAttempted) {
+        _ignoreConnectedUntilDisconnected = true;
         final failure = _failureCategory;
         final failedPhase = _phase;
         final failureMessage = _message;
@@ -425,20 +442,26 @@ class VpnEngine extends ChangeNotifier {
       _stopPending = false;
       return true;
     }
+    final wasAlreadyDisconnected =
+        _status.connectionState == VlessConnectionState.disconnected;
+    final revisionAtRequest = _statusRevision;
     _stopPending = true;
     _awaitingStartStatus = false;
+    _ignoreConnectedUntilDisconnected = true;
     _phase = 'stopping';
     final done = Completer<void>();
     _disconnectResult = done;
     _notify();
     try {
-      await _client.stopVless().timeout(const Duration(seconds: 12));
-      if (_status.connectionState == VlessConnectionState.disconnected) {
+      await _client.stopVless().timeout(const Duration(seconds: 10));
+      if (_status.connectionState == VlessConnectionState.disconnected &&
+          (wasAlreadyDisconnected || _statusRevision > revisionAtRequest)) {
         _stopPending = false;
+        _ignoreConnectedUntilDisconnected = false;
         _completeConnect(false);
         return true;
       }
-      await done.future.timeout(const Duration(seconds: 5));
+      await done.future.timeout(const Duration(seconds: 3));
       return _status.connectionState == VlessConnectionState.disconnected;
     } on Object {
       _stopPending = false;
