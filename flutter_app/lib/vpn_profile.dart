@@ -34,6 +34,8 @@ class VpnProfile {
 
     final rawProtocol =
         (parsed.outbound1['protocol'] ?? '').toString().trim().toLowerCase();
+    final sanitizedProtocol =
+        rawProtocol.replaceAll(RegExp(r'[^a-z0-9_-]'), '').toUpperCase();
     final protocol = switch (rawProtocol) {
       'vless' => 'VLESS',
       'vmess' => 'VMess',
@@ -43,8 +45,7 @@ class VpnProfile {
       'wireguard' => 'WireGuard',
       'socks' => 'SOCKS',
       'http' => 'HTTP',
-      '' => 'Imported',
-      _ => rawProtocol.replaceAll(RegExp(r'[^a-z0-9_-]'), '').toUpperCase(),
+      _ => sanitizedProtocol.isEmpty ? 'Imported' : sanitizedProtocol,
     };
     final address = parsed.address.trim();
     final port = parsed.port >= 1 && parsed.port <= 65535 ? parsed.port : 0;

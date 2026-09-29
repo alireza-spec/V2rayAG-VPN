@@ -60,6 +60,72 @@ jobs:
       - name: Generate Android project files
         run: flutter create --platforms=android --project-name=v2rayag_vpn .
 
+      - name: Add Android launcher app picker
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          manifest = Path('android/app/src/main/AndroidManifest.xml')
+          xml = manifest.read_text()
+          if '<queries>' not in xml:
+              query_block = '''
+              <queries>
+                  <intent>
+                      <action android:name="android.intent.action.MAIN" />
+                      <category android:name="android.intent.category.LAUNCHER" />
+                  </intent>
+              </queries>'''
+              xml, count = re.subn(r'(<manifest\b[^>]*>)', r'\1' + query_block, xml, count=1)
+              if count != 1:
+                  raise SystemExit('Could not configure launcher-only package visibility')
+              manifest.write_text(xml)
+
+          activities = list(Path('android/app/src/main/kotlin').rglob('MainActivity.kt'))
+          if len(activities) != 1:
+              raise SystemExit(f'Expected one generated Kotlin MainActivity, found {len(activities)}')
+          path = activities[0]
+          old = path.read_text()
+          match = re.search(r'^package\s+([A-Za-z0-9_.]+)', old, re.M)
+          if not match:
+              raise SystemExit('Could not determine generated Android package')
+          package = match.group(1)
+          source = f'''package {package}
+
+          import android.content.Intent
+          import io.flutter.embedding.android.FlutterActivity
+          import io.flutter.embedding.engine.FlutterEngine
+          import io.flutter.plugin.common.MethodChannel
+
+          class MainActivity : FlutterActivity() {{
+              override fun configureFlutterEngine(flutterEngine: FlutterEngine) {{
+                  super.configureFlutterEngine(flutterEngine)
+                  MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "v2rayag/app_picker")
+                      .setMethodCallHandler {{ call, result ->
+                          if (call.method != "listLaunchableApps") {{
+                              result.notImplemented()
+                              return@setMethodCallHandler
+                          }}
+                          val intent = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
+                          val apps = packageManager.queryIntentActivities(intent, 0)
+                              .mapNotNull {{ resolved ->
+                                  val activity = resolved.activityInfo ?: return@mapNotNull null
+                                  if (activity.packageName == packageName) return@mapNotNull null
+                                  mapOf(
+                                      "packageName" to activity.packageName,
+                                      "label" to resolved.loadLabel(packageManager).toString()
+                                  )
+                              }}
+                              .distinctBy {{ it["packageName"] }}
+                              .sortedBy {{ it["label"]?.lowercase().orEmpty() }}
+                          result.success(apps)
+                      }}
+              }}
+          }}
+          '''
+          path.write_text(source)
+          PY
+
       - name: Set Android launcher and installer name
         run: |
           python3 - <<'PY'
@@ -68,10 +134,10 @@ jobs:
 
           manifest = Path('android/app/src/main/AndroidManifest.xml')
           xml = manifest.read_text()
-          updated, count = re.subn(r'android:label="[^"]*"', 'android:label="V2rayAG VPN"', xml, count=1)
+          updated, count = re.subn(r'android:label="[^"]*"', 'android:label="V2rayAG"', xml, count=1)
           if count == 0:
-              updated, count = re.subn(r'(<application\b)', r'\1 android:label="V2rayAG VPN"', xml, count=1)
-          if count != 1 or 'android:label="V2rayAG VPN"' not in updated:
+              updated, count = re.subn(r'(<application\b)', r'\1 android:label="V2rayAG"', xml, count=1)
+          if count != 1 or 'android:label="V2rayAG"' not in updated:
               raise SystemExit('Could not set the Android display name')
           manifest.write_text(updated)
           PY

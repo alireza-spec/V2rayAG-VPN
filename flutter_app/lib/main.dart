@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 import 'app_localizations.dart';
 import 'app_preferences.dart';
@@ -10,6 +11,7 @@ import 'language_preferences.dart';
 import 'subscription_service.dart';
 import 'vpn_engine.dart';
 import 'vpn_profile.dart';
+import 'traffic_format.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -151,7 +153,7 @@ class _V2rayAgAppState extends State<V2rayAgApp> {
     }
 
     return MaterialApp(
-      title: 'V2rayAG VPN',
+      title: 'V2rayAG',
       debugShowCheckedModeBanner: false,
       locale: _locale,
       supportedLocales: V2rayLocalizations.supportedLocales,
@@ -207,6 +209,12 @@ class _VpnShellState extends State<VpnShell> {
   List<SavedSubscription> _savedSubscriptions = [];
   bool _subscriptionBusy = false;
   int? _selectedIndex;
+  final Map<int, int> _profilePings = {};
+  final Set<int> _probingProfiles = {};
+  final Set<String> _excludedPackages = {};
+  static const MethodChannel _appPickerChannel =
+      MethodChannel('v2rayag/app_picker');
+  static const _excludedPackagesKey = 'excluded_packages_v1';
 
   static const _exclusiveId = 'exclusive-v2rayag';
 
@@ -216,6 +224,7 @@ class _VpnShellState extends State<VpnShell> {
     _engine.addListener(_onEngineChanged);
     _engine.initialize();
     _restoreSubscriptions();
+    _restoreExcludedPackages();
   }
 
   Future<void> _restoreSubscriptions() async {
@@ -224,6 +233,123 @@ class _VpnShellState extends State<VpnShell> {
       if (mounted) setState(() => _savedSubscriptions = saved);
     } on Object {
       if (mounted) _showMessage('Secure subscription storage is unavailable on this device.');
+    }
+  }
+
+  Future<void> _restoreExcludedPackages() async {
+    try {
+      final preferences = await SharedPreferences.getInstance();
+      final stored = preferences.getStringList(_excludedPackagesKey) ?? const [];
+      if (mounted) setState(() => _excludedPackages
+        ..clear()
+        ..addAll(stored));
+    } on Object {
+      // Routing preferences are optional; default to routing all apps through VPN.
+    }
+  }
+
+  Future<void> _editExcludedApps() async {
+    if (_subscriptionBusy || _engine.connected || _engine.connecting ||
+        _engine.disconnecting || _engine.busy) {
+      _showMessage('Disconnect before changing app routing.');
+      return;
+    }
+
+    List<dynamic> rawApps;
+    try {
+      rawApps = await _appPickerChannel.invokeListMethod<dynamic>(
+            'listLaunchableApps',
+          ) ??
+          const [];
+    } on Object {
+      if (mounted) {
+        _showMessage('Could not list apps on this device. Restart the app and try again.');
+      }
+      return;
+    }
+
+    final apps = <_InstalledApp>[];
+    for (final item in rawApps) {
+      if (item is! Map) continue;
+      final packageName = (item['packageName'] ?? '').toString().trim();
+      final label = (item['label'] ?? packageName).toString().trim();
+      if (packageName.isEmpty) continue;
+      apps.add(_InstalledApp(packageName, label.isEmpty ? packageName : label));
+    }
+    apps.sort((a, b) => a.label.toLowerCase().compareTo(b.label.toLowerCase()));
+    if (apps.isEmpty) {
+      if (mounted) _showMessage('No apps with a launcher icon were found.');
+      return;
+    }
+
+    final selected = Set<String>.of(_excludedPackages);
+    final result = await showDialog<Set<String>>(
+      context: context,
+      builder: (dialogContext) => StatefulBuilder(
+        builder: (context, refresh) => AlertDialog(
+          title: const LocalizedText('Bypass apps'),
+          content: SizedBox(
+            width: double.maxFinite,
+            height: MediaQuery.sizeOf(context).height * .55,
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const LocalizedText(
+                  'Choose apps whose traffic should use the normal connection.',
+                  style: TextStyle(fontSize: 12, color: _muted),
+                ),
+                const SizedBox(height: 8),
+                Expanded(
+                  child: ListView.builder(
+                    itemCount: apps.length,
+                    itemBuilder: (context, index) {
+                      final app = apps[index];
+                      return CheckboxListTile(
+                        dense: true,
+                        value: selected.contains(app.packageName),
+                        title: Text(app.label, maxLines: 1, overflow: TextOverflow.ellipsis),
+                        subtitle: Text(app.packageName, maxLines: 1, overflow: TextOverflow.ellipsis),
+                        onChanged: (checked) => refresh(() {
+                          if (checked == true) {
+                            selected.add(app.packageName);
+                          } else {
+                            selected.remove(app.packageName);
+                          }
+                        }),
+                      );
+                    },
+                  ),
+                ),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(dialogContext).pop(),
+              child: const LocalizedText('Cancel'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.of(dialogContext).pop(selected),
+              child: const LocalizedText('Apply'),
+            ),
+          ],
+        ),
+      ),
+    );
+    if (result == null || !mounted) return;
+    try {
+      final preferences = await SharedPreferences.getInstance();
+      final values = result.toList()..sort();
+      await preferences.setStringList(_excludedPackagesKey, values);
+      if (mounted) {
+        setState(() {
+          _excludedPackages
+            ..clear()
+            ..addAll(values);
+        });
+      }
+    } on Object {
+      if (mounted) _showMessage('Could not save app routing choices.');
     }
   }
 
@@ -255,7 +381,10 @@ class _VpnShellState extends State<VpnShell> {
     if (_engine.connected || _engine.connecting || _engine.disconnecting) {
       await _engine.disconnect();
     } else {
-      await _engine.connect(profile);
+      await _engine.connect(
+        profile,
+        blockedApps: _excludedPackages.toList(growable: false),
+      );
     }
     if (mounted && _engine.message != null) _showMessage(_engine.message!);
   }
@@ -326,6 +455,19 @@ class _VpnShellState extends State<VpnShell> {
         ],
       ),
     );
+  }
+
+  Future<void> _testProfileLatency(int index) async {
+    if (_subscriptionBusy || _engine.connected || _engine.connecting || _engine.disconnecting || _engine.busy) return;
+    if (index < 0 || index >= _profiles.length || _probingProfiles.contains(index)) return;
+    setState(() => _probingProfiles.add(index));
+    final result = await _engine.measurePing(_profiles[index]);
+    if (!mounted) return;
+    setState(() {
+      _probingProfiles.remove(index);
+      if (result != null) _profilePings[index] = result;
+    });
+    if (result == null && _engine.message != null) _showMessage(_engine.message!);
   }
 
   void _selectProfile(int index) {
@@ -503,6 +645,8 @@ class _VpnShellState extends State<VpnShell> {
         _profiles
           ..clear()
           ..addAll(profiles);
+        _profilePings.clear();
+        _probingProfiles.clear();
         _selectedIndex = 0;
         _tab = connectFirst ? 0 : 1;
       });
@@ -518,10 +662,14 @@ class _VpnShellState extends State<VpnShell> {
         // trap the user in a long sequence. Manual selection remains available.
         final attemptCount = profiles.length < 8 ? profiles.length : 8;
         var rejectedConfiguration = false;
+        var routeHealthFailed = false;
         for (var index = 0; index < attemptCount; index++) {
           if (!mounted) return;
           setState(() => _selectedIndex = index);
-          final started = await _engine.connect(profiles[index]);
+          final started = await _engine.connect(
+            profiles[index],
+            blockedApps: _excludedPackages.toList(growable: false),
+          );
           if (!mounted) return;
           if (started) {
             if (index > 0) {
@@ -537,19 +685,27 @@ class _VpnShellState extends State<VpnShell> {
             break;
           }
           if (failure == 'VpnPermissionDenied') break;
-          // Only try another node for a profile-specific rejection. Other
-          // native startup failures usually need OS/app repair, not rotation.
-          if (shouldRetryConfigRejectedProfile(failure)) {
-            rejectedConfiguration = true;
+          // Retry only when this attempt is known to have been rejected or
+          // safely stopped after a route-specific timeout/disconnect. Never
+          // rotate while a native tunnel may still be active.
+          if (shouldRetrySubscriptionProfile(failure)) {
+            if (failure == 'RouteHealthCheckFailed') {
+              routeHealthFailed = true;
+            } else if (failure == 'InvalidConfiguration' ||
+                failure == 'PlatformException:INVALID_CONFIG') {
+              rejectedConfiguration = true;
+            }
           } else {
             break;
           }
         }
 
         if (!mounted) return;
-        _showMessage(rejectedConfiguration
-            ? 'The native VPN engine rejected subscription profiles. Refresh the subscription or choose a different server.'
-            : 'No server in the subscription could be started. Check server access or choose another profile.');
+        _showMessage(routeHealthFailed
+            ? 'No subscription server passed the live network check. Try another network or refresh the server list.'
+            : rejectedConfiguration
+                ? 'The native VPN engine rejected subscription profiles. Refresh the subscription or choose a different server.'
+                : 'No server in the subscription could be started. Check server access or choose another profile.');
       } else {
         _showMessage('Loaded ${profiles.length} server profiles into app memory.');
       }
@@ -572,6 +728,8 @@ class _VpnShellState extends State<VpnShell> {
     }
     setState(() {
       _profiles.removeAt(index);
+      _profilePings.clear();
+      _probingProfiles.clear();
       if (_profiles.isEmpty) {
         _selectedIndex = null;
       } else if (_selectedIndex == index) {
@@ -608,6 +766,9 @@ class _VpnShellState extends State<VpnShell> {
         onImport: _importProfile,
         onSelect: _selectProfile,
         onRemove: _removeProfile,
+        profilePings: _profilePings,
+        probingProfiles: _probingProfiles,
+        onTestProfileLatency: _testProfileLatency,
         subscriptions: _savedSubscriptions,
         onAddSubscription: _addSubscription,
         onEditSubscription: _editSavedSubscription,
@@ -626,6 +787,8 @@ class _VpnShellState extends State<VpnShell> {
         onReducedMotionChanged: widget.onReducedMotionChanged,
         onShowDestinationChanged: widget.onShowDestinationChanged,
         onThemeChanged: widget.onThemeChanged,
+        onEditAppRouting: _editExcludedApps,
+        excludedAppsCount: _excludedPackages.length,
       ),
     ];
 
@@ -639,7 +802,7 @@ class _VpnShellState extends State<VpnShell> {
             Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                LocalizedText('V2rayAG VPN', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w800)),
+                LocalizedText('V2rayAG', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w800)),
                 LocalizedText('PRIVATE ROUTE', style: TextStyle(fontSize: 9, letterSpacing: 1.7, color: _muted)),
               ],
             ),
@@ -741,7 +904,7 @@ class _HomePage extends StatelessWidget {
                 profile == null
                     ? 'Import a server before connecting'
                     : engine.connected
-                        ? 'Protected route active on this Android device'
+                        ? 'VPN service is connected. Test latency to verify network access.'
                         : engine.message ??
                             (engine.connecting
                                 ? 'Waiting for the Android tunnel status…'
@@ -827,12 +990,29 @@ class _HomePage extends StatelessWidget {
               LocalizedText(profile == null ? 'No client address is read or displayed.' : 'Country: not looked up',
                   style: const TextStyle(fontSize: 12, color: _muted)),
               const SizedBox(height: 8),
-              LocalizedText(
-                engine.connected
-                    ? '↓ ${engine.status.downloadSpeed} B/s   ↑ ${engine.status.uploadSpeed} B/s'
-                    : 'Live traffic stats appear after a real connection.',
-                style: const TextStyle(fontSize: 11, color: _muted),
-              ),
+              if (engine.connected || engine.hasSessionData) ...[
+                _MetricRow(
+                  label: 'LIVE SPEED',
+                  value: engine.connected
+                      ? '↓ ${formatByteRate(engine.status.downloadSpeed)}   ↑ ${formatByteRate(engine.status.uploadSpeed)}'
+                      : '↓ ${formatByteRate(0)}   ↑ ${formatByteRate(0)}',
+                ),
+                const SizedBox(height: 4),
+                _MetricRow(
+                  label: 'SESSION TOTAL',
+                  value: '↓ ${formatByteCount(engine.sessionDownloadBytes)}   ↑ ${formatByteCount(engine.sessionUploadBytes)}',
+                ),
+                const SizedBox(height: 4),
+                _MetricRow(
+                  label: 'CONNECTED TIME',
+                  value: formatConnectionDuration(engine.connectedDuration),
+                ),
+              ] else
+                const LocalizedText(
+                  'Live traffic stats appear after a real connection.',
+                  style: TextStyle(fontSize: 11, color: _muted),
+                ),
+
               const SizedBox(height: 10),
               Row(children: [
                 OutlinedButton.icon(
@@ -890,6 +1070,26 @@ class _HomePage extends StatelessWidget {
       ],
     );
   }
+}
+
+class _MetricRow extends StatelessWidget {
+  const _MetricRow({required this.label, required this.value});
+
+  final String label;
+  final String value;
+
+  @override
+  Widget build(BuildContext context) => Row(
+        children: [
+          Expanded(child: LocalizedText(label, style: const TextStyle(fontSize: 10, color: _muted))),
+          Flexible(
+            child: Directionality(
+              textDirection: TextDirection.ltr,
+              child: Text(value, textAlign: TextAlign.right, style: const TextStyle(fontSize: 11, color: _muted)),
+            ),
+          ),
+        ],
+      );
 }
 
 class _PowerOrb extends StatefulWidget {
@@ -1064,6 +1264,9 @@ class _ProfilesPage extends StatelessWidget {
     required this.onImport,
     required this.onSelect,
     required this.onRemove,
+    required this.profilePings,
+    required this.probingProfiles,
+    required this.onTestProfileLatency,
     required this.subscriptions,
     required this.onAddSubscription,
     required this.onEditSubscription,
@@ -1081,6 +1284,9 @@ class _ProfilesPage extends StatelessWidget {
   final VoidCallback onImport;
   final ValueChanged<int> onSelect;
   final ValueChanged<int> onRemove;
+  final Map<int, int> profilePings;
+  final Set<int> probingProfiles;
+  final ValueChanged<int> onTestProfileLatency;
   final List<SavedSubscription> subscriptions;
   final VoidCallback onAddSubscription;
   final ValueChanged<SavedSubscription> onEditSubscription;
@@ -1194,10 +1400,23 @@ class _ProfilesPage extends StatelessWidget {
                     child: Text('${profile.protocol} · ${showDestination ? profile.destination : context.tr('Destination hidden')}'),
                   ),
                   Text('${context.tr('Country not looked up')} · ${context.tr(active && connected ? 'connected' : 'ready')}'),
+                  if (profilePings[index] != null)
+                    Text('${context.tr('Latency')}: ${profilePings[index]} ms', style: const TextStyle(color: _muted, fontSize: 12)),
                 ],
               ),
               isThreeLine: true,
-              trailing: IconButton(tooltip: context.tr('Remove profile'), onPressed: connected && active ? null : () => onRemove(index), icon: const Icon(Icons.close_rounded)),
+              trailing: Wrap(spacing: 0, children: [
+                IconButton(
+                  tooltip: context.tr('Test latency'),
+                  onPressed: connected || subscriptionBusy || probingProfiles.contains(index)
+                      ? null
+                      : () => onTestProfileLatency(index),
+                  icon: probingProfiles.contains(index)
+                      ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2))
+                      : const Icon(Icons.speed_rounded),
+                ),
+                IconButton(tooltip: context.tr('Remove profile'), onPressed: connected && active ? null : () => onRemove(index), icon: const Icon(Icons.close_rounded)),
+              ]),
             ),
           );
         }),
@@ -1226,6 +1445,12 @@ class _EmptyCard extends StatelessWidget {
       );
 }
 
+class _InstalledApp {
+  const _InstalledApp(this.packageName, this.label);
+  final String packageName;
+  final String label;
+}
+
 class _SettingsPage extends StatelessWidget {
   const _SettingsPage({
     required this.locale,
@@ -1236,6 +1461,8 @@ class _SettingsPage extends StatelessWidget {
     required this.onReducedMotionChanged,
     required this.onShowDestinationChanged,
     required this.onThemeChanged,
+    required this.onEditAppRouting,
+    required this.excludedAppsCount,
   });
 
   final Locale locale;
@@ -1246,6 +1473,8 @@ class _SettingsPage extends StatelessWidget {
   final ValueChanged<bool> onReducedMotionChanged;
   final ValueChanged<bool> onShowDestinationChanged;
   final ValueChanged<bool> onThemeChanged;
+  final VoidCallback onEditAppRouting;
+  final int excludedAppsCount;
 
   @override
   Widget build(BuildContext context) => ListView(padding: const EdgeInsets.fromLTRB(20, 18, 20, 28), children: [
@@ -1272,6 +1501,16 @@ class _SettingsPage extends StatelessWidget {
           SwitchListTile(title: const LocalizedText('Reduce animations'), subtitle: const LocalizedText('Reduce decorative motion'), value: reducedMotion, onChanged: onReducedMotionChanged),
           const Divider(height: 1, indent: 16, endIndent: 16),
           SwitchListTile(title: const LocalizedText('Show destination address'), subtitle: const LocalizedText('Hides the server address in the UI'), value: showDestination, onChanged: onShowDestinationChanged),
+          const Divider(height: 1, indent: 16, endIndent: 16),
+          ListTile(
+            leading: const Icon(Icons.apps_rounded),
+            title: const LocalizedText('Bypass apps'),
+            subtitle: Text(excludedAppsCount == 0
+                ? context.tr('No apps excluded')
+                : '$excludedAppsCount apps excluded from VPN'),
+            trailing: const Icon(Icons.chevron_right_rounded),
+            onTap: onEditAppRouting,
+          ),
         ])),
         const SizedBox(height: 16),
         Container(
@@ -1284,11 +1523,11 @@ class _SettingsPage extends StatelessWidget {
           child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
             LocalizedText('Platform scope', style: TextStyle(fontWeight: FontWeight.w800, color: Theme.of(context).brightness == Brightness.dark ? const Color(0xFFFFB29B) : const Color(0xFF8A5548))),
             const SizedBox(height: 8),
-            LocalizedText('The Android tunnel uses the native Xray-backed VPN service. iPhone still needs its Network Extension project, Apple signing, and device testing. DNS policy, kill switch, auto-connect, and trusted country lookup are not enabled in this build.', style: TextStyle(fontSize: 12, height: 1.5, color: Theme.of(context).brightness == Brightness.dark ? const Color(0xFFE6C7BC) : const Color(0xFF8A5548))),
+            LocalizedText('Android VPN sessions route system DNS through the selected proxy. You can exclude selected launcher apps from the VPN. iPhone still needs its Network Extension project, Apple signing, and device testing. A kill switch, auto-connect, and trusted country lookup are not enabled in this build.', style: TextStyle(fontSize: 12, height: 1.5, color: Theme.of(context).brightness == Brightness.dark ? const Color(0xFFE6C7BC) : const Color(0xFF8A5548))),
           ]),
         ),
         const SizedBox(height: 20),
-        const ListTile(leading: _BrandMark(), title: LocalizedText('V2rayAG VPN'), subtitle: LocalizedText('Source: Telegram @V2rayAG\nDeveloper: V2rayAG telegram channel and HashtagAlireza')),
+        const ListTile(leading: _BrandMark(), title: LocalizedText('V2rayAG'), subtitle: LocalizedText('Source: Telegram @V2rayAG\nDeveloper: V2rayAG telegram channel and HashtagAlireza')),
       ]);
 }
 

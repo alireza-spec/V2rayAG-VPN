@@ -28,6 +28,18 @@ unsupported://ignored
       expect(links.last, startsWith('ss://'));
     });
 
+    test('recognizes additional flutter_vless share-link protocols in fallback parsing', () {
+      const payload = '''
+socks://proxy.example:1080#SOCKS
+hysteria2://secret@hy.example:443#Hysteria
+hy2://secret@hy2.example:443#Hy2
+''';
+      final links = SubscriptionPayloadParser.extractShareLinks(payload);
+      expect(links, hasLength(3));
+      expect(links.map((link) => link.split('://').first),
+          containsAll(['socks', 'hysteria2', 'hy2']));
+    });
+
     test('returns no links for empty or unsupported content', () {
       expect(SubscriptionPayloadParser.extractShareLinks(''), isEmpty);
       expect(SubscriptionPayloadParser.extractShareLinks('provider login page'), isEmpty);
@@ -48,6 +60,15 @@ unsupported://ignored
       expect(profiles.single.destination, 'node.example:443');
       final config = jsonDecode(profiles.single.config) as Map<String, dynamic>;
       expect(config['outbounds'], isNotEmpty);
+    });
+
+    test('keeps valid share links when another subscription line is malformed', () {
+      const payload = '''
+vless://malformed
+vless://11111111-1111-4111-8111-111111111111@node.example:443?type=tcp&security=none#GoodNode
+''';
+      final profiles = SubscriptionService.parsePayload(payload);
+      expect(profiles.any((profile) => profile.name == 'GoodNode'), isTrue);
     });
 
     test('preserves host and path for a VLESS WebSocket profile', () {

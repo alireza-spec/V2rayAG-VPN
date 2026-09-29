@@ -92,6 +92,8 @@ class SubscriptionService {
           );
         }
         final target = currentUri.resolve(location);
+        // A subscription URL itself is a credential. Do not forward its path
+        // or query token to a different host, even over HTTPS.
         final sameOrigin = target.scheme.toLowerCase() == 'https' &&
             target.host.toLowerCase() == uri.host.toLowerCase() &&
             target.port == uri.port &&
@@ -145,15 +147,36 @@ class SubscriptionService {
   /// Parses provider payloads through the same maintained parser used to create
   /// the native Xray profiles. Individual credentials remain only in memory.
   static List<VpnProfile> parsePayload(String payload) {
-    final parsed = FlutterVless.parseMany(payload);
     final profiles = <VpnProfile>[];
-    for (final item in parsed.take(maxProfiles)) {
+    try {
+      final parsed = FlutterVless.parseMany(payload);
+      for (final item in parsed.take(maxProfiles)) {
+        try {
+          profiles.add(VpnProfile.fromParsed(item));
+        } on FormatException {
+          // Skip malformed entries without exposing provider data.
+        } on Object {
+          // A bad entry must not invalidate other usable profiles.
+        }
+      }
+    } on Object {
+      // Some provider payloads contain a bad line that makes parseMany fail as
+      // a whole. Independently parsing recognized share links below preserves
+      // any valid entries from mixed-quality subscriptions.
+    }
+
+    final links = SubscriptionPayloadParser.extractShareLinks(payload);
+    for (final link in links) {
+      if (profiles.length >= maxProfiles) break;
       try {
-        profiles.add(VpnProfile.fromParsed(item));
+        final profile = VpnProfile.fromShareLink(link);
+        if (!profiles.any((existing) => existing.config == profile.config)) {
+          profiles.add(profile);
+        }
       } on FormatException {
-        // Skip malformed entries without exposing provider data.
+        // Keep valid nodes even if another line in the feed is malformed.
       } on Object {
-        // A bad entry must not invalidate other usable profiles.
+        // Never expose raw provider data in errors.
       }
     }
     return profiles;
@@ -181,7 +204,15 @@ class SubscriptionService {
 }
 
 class SubscriptionPayloadParser {
-  static const _schemes = ['vless://', 'vmess://', 'ss://', 'trojan://'];
+  static const _schemes = [
+    'vless://',
+    'vmess://',
+    'ss://',
+    'trojan://',
+    'socks://',
+    'hysteria2://',
+    'hy2://',
+  ];
 
   /// Supports plain newline-separated share links and Base64-encoded provider
   /// responses. Lines containing unsupported schemes are ignored.

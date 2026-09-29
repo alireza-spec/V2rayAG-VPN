@@ -1,12 +1,20 @@
 import 'dart:async';
-
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_vless/flutter_vless.dart';
 
 import 'vpn_profile.dart';
 
-/// Only profile-specific config rejection should trigger automatic fallback.
+/// Configuration rejection and a fully cleaned-up unreachable node are safe
+/// reasons to try another profile in an automatic subscription connection.
+bool shouldRetrySubscriptionProfile(String? category) =>
+    category == 'InvalidConfiguration' ||
+    category == 'PlatformException:INVALID_CONFIG' ||
+    category == 'TunnelDisconnected' ||
+    category == 'ConnectTimeout' ||
+    category == 'RouteHealthCheckFailed';
+
+/// Backwards-compatible policy name retained for existing tests/callers.
 bool shouldRetryConfigRejectedProfile(String? category) =>
     category == 'InvalidConfiguration' ||
     category == 'PlatformException:INVALID_CONFIG';
@@ -33,7 +41,16 @@ class VpnEngine extends ChangeNotifier {
   String? _failureCategory;
   String _phase = 'idle';
   int? _lastPingMs;
-  Timer? _connectWatchdog;
+  Completer<bool>? _connectResult;
+  Completer<void>? _disconnectResult;
+  Stopwatch? _sessionClock;
+  Duration _lastSessionDuration = Duration.zero;
+  bool _hasSessionData = false;
+  Timer? _sessionTicker;
+  int _sessionUpload = 0;
+  int _sessionDownload = 0;
+  int _lastNativeUpload = 0;
+  int _lastNativeDownload = 0;
 
   VlessStatus get status => _status;
   bool get initialized => _initialized;
@@ -42,6 +59,12 @@ class VpnEngine extends ChangeNotifier {
   String? get coreVersion => _coreVersion;
   String? get failureCategory => _failureCategory;
   int? get lastPingMs => _lastPingMs;
+  int get sessionUploadBytes => _sessionUpload;
+  int get sessionDownloadBytes => _sessionDownload;
+
+  Duration get connectedDuration =>
+      connected && _sessionClock != null ? _sessionClock!.elapsed : _lastSessionDuration;
+  bool get hasSessionData => _hasSessionData;
 
   bool get connected => _status.connectionState == VlessConnectionState.connected;
   bool get connecting => !_stopPending &&
@@ -51,9 +74,8 @@ class VpnEngine extends ChangeNotifier {
   bool get disconnecting =>
       _stopPending || _status.connectionState == VlessConnectionState.disconnecting;
 
-  /// Allows first user-initiated start after native initialization even if the
-  /// backend has not emitted an initial status event. Active/transitional states
-  /// still prevent duplicate starts.
+  /// Allows the first user-initiated start after native initialization even if
+  /// the backend has not yet emitted its initial disconnected status.
   bool get canStart =>
       _initialized &&
       _status.connectionState != VlessConnectionState.connected &&
@@ -99,18 +121,76 @@ class VpnEngine extends ChangeNotifier {
     if (!_disposed) notifyListeners();
   }
 
+  void _completeConnect(bool result) {
+    final completer = _connectResult;
+    if (completer != null && !completer.isCompleted) completer.complete(result);
+  }
+
+  void _completeDisconnect() {
+    final completer = _disconnectResult;
+    if (completer != null && !completer.isCompleted) completer.complete();
+  }
+
+  void _beginSession(VlessStatus next) {
+    _sessionClock?.stop();
+    _sessionClock = Stopwatch()..start();
+    _lastSessionDuration = Duration.zero;
+    _hasSessionData = true;
+    _sessionUpload = 0;
+    _sessionDownload = 0;
+    _lastNativeUpload = 0;
+    _lastNativeDownload = 0;
+    _sessionTicker?.cancel();
+    _sessionTicker = Timer.periodic(const Duration(seconds: 1), (_) => _notify());
+    _recordTraffic(next);
+  }
+
+  void _endSession() {
+    final clock = _sessionClock;
+    if (clock != null) {
+      clock.stop();
+      _lastSessionDuration = clock.elapsed;
+      _sessionClock = null;
+    }
+    _sessionTicker?.cancel();
+    _sessionTicker = null;
+  }
+
+  void _recordTraffic(VlessStatus next) {
+    if (_sessionClock == null) return;
+    final upload = next.upload < 0 ? 0 : next.upload;
+    final download = next.download < 0 ? 0 : next.download;
+    // Native counters are session cumulative. If the runtime restarts a counter,
+    // keep already-accounted bytes and add the new counter's current value.
+    _sessionUpload += upload >= _lastNativeUpload
+        ? upload - _lastNativeUpload
+        : upload;
+    _sessionDownload += download >= _lastNativeDownload
+        ? download - _lastNativeDownload
+        : download;
+    _lastNativeUpload = upload;
+    _lastNativeDownload = download;
+  }
+
   void _onStatus(VlessStatus next) {
     if (_disposed) return;
     final previous = _status.connectionState;
+    final wasConnected = previous == VlessConnectionState.connected;
     _status = next;
+
+    if (next.connectionState == VlessConnectionState.connected && !wasConnected) {
+      _beginSession(next);
+    } else {
+      _recordTraffic(next);
+    }
+
     switch (next.connectionState) {
       case VlessConnectionState.connected:
         _awaitingStartStatus = false;
-        _connectWatchdog?.cancel();
-        _connectWatchdog = null;
         _phase = 'connected';
         _message = null;
         _failureCategory = null;
+        _completeConnect(true);
         break;
       case VlessConnectionState.connecting:
         _awaitingStartStatus = false;
@@ -118,43 +198,36 @@ class VpnEngine extends ChangeNotifier {
         break;
       case VlessConnectionState.disconnecting:
         _awaitingStartStatus = false;
-        _connectWatchdog?.cancel();
         _phase = 'disconnecting';
         break;
       case VlessConnectionState.disconnected:
+        _endSession();
         if (_stopPending) {
           _stopPending = false;
           _awaitingStartStatus = false;
-          _connectWatchdog?.cancel();
           _phase = 'disconnected';
-        } else if (previous == VlessConnectionState.connecting ||
+          _completeDisconnect();
+          _completeConnect(false);
+          _message = null;
+          _failureCategory = null;
+        } else if ((_awaitingStartStatus && previous == VlessConnectionState.connecting) ||
             previous == VlessConnectionState.connected) {
           _awaitingStartStatus = false;
-          _connectWatchdog?.cancel();
           _phase = 'disconnected';
           _failureCategory = 'TunnelDisconnected';
-          _message = 'The tunnel disconnected unexpectedly. Check the server, profile, and network.';
+          _message = 'The tunnel stopped before a working session was confirmed. Check the server, profile, and network.';
+          _completeConnect(false);
+        } else if (_awaitingStartStatus) {
+          // A native initial DISCONNECTED snapshot can precede CONNECTING.
+          // Keep waiting for the start result instead of treating it as failure.
+        } else {
+          _phase = 'disconnected';
         }
         break;
       case VlessConnectionState.unknown:
         break;
     }
     _notify();
-  }
-
-  void _armConnectWatchdog() {
-    _connectWatchdog?.cancel();
-    _connectWatchdog = Timer(const Duration(seconds: 40), () {
-      if (_disposed || connected || !connecting) return;
-      _phase = 'connect-timeout';
-      // If the plugin never emits even a connecting event, release the local
-      // pending latch so the user can retry. A reported native `connecting`
-      // state remains authoritative and is safely disconnected first.
-      _awaitingStartStatus = false;
-      _failureCategory = 'ConnectTimeout';
-      _message = 'The tunnel is taking longer than expected. The app has not confirmed a working connection.';
-      _notify();
-    });
   }
 
   Future<void> initialize() async {
@@ -193,16 +266,22 @@ class VpnEngine extends ChangeNotifier {
     }
   }
 
-  Future<bool> connect(VpnProfile profile) async {
+  Future<bool> connect(
+    VpnProfile profile, {
+    List<String> blockedApps = const [],
+  }) async {
     if (!canStart) return false;
     _busy = true;
     _startPending = true;
+    _awaitingStartStatus = false;
     _phase = 'permission-request';
     _failureCategory = null;
     _message = null;
     _lastPingMs = null;
+    final result = Completer<bool>();
+    _connectResult = result;
     _notify();
-    var startAccepted = false;
+    var ownsBusy = true;
     try {
       final permitted = await _client.requestPermission();
       if (!permitted) {
@@ -216,40 +295,159 @@ class VpnEngine extends ChangeNotifier {
       await _client.startVless(
         remark: profile.name,
         config: profile.config,
+        blockedApps: blockedApps,
         proxyOnly: false,
+        androidDnsPolicy: AndroidDnsPolicy.proxy,
         notificationDisconnectButtonName: 'Disconnect',
       ).timeout(const Duration(seconds: 30));
-      startAccepted = true;
-      _phase = connected ? 'connected' : 'waiting-for-tunnel';
-      if (!connected && _status.connectionState != VlessConnectionState.connecting) {
-        _awaitingStartStatus = true;
+      _phase = connected ? 'native-connected' : 'waiting-for-connected-status';
+
+      // startVless() acknowledges a native request, not a usable data path.
+      // Release the operation lock while waiting so a slow/hung connect can be
+      // cancelled by the user.
+      _busy = false;
+      ownsBusy = false;
+      _notify();
+      bool confirmed;
+      try {
+        confirmed = await result.future.timeout(const Duration(seconds: 25));
+      } on TimeoutException {
+        _phase = 'connect-timeout';
+        _failureCategory = 'ConnectTimeout';
+        _message = 'The app did not receive confirmation of a working tunnel in time.';
+        _busy = true;
+        ownsBusy = true;
+        _notify();
+        final cleaned = await _stopNativeAndWait(forceRequest: true);
+        if (!cleaned) {
+          _failureCategory = 'TunnelResetFailed';
+          _phase = 'connect-cleanup-failed';
+          _message = 'The connection timed out and Android did not confirm cleanup. Retry disconnect before starting another server.';
+        } else {
+          _failureCategory = 'ConnectTimeout';
+          _phase = 'connect-timeout';
+          _message = 'The server did not confirm a working connection in time.';
+        }
+        return false;
       }
-      if (!connected) _armConnectWatchdog();
+      if (!confirmed) {
+        _failureCategory ??= 'TunnelDisconnected';
+        _message ??= 'The native tunnel stopped before connection was confirmed.';
+        return false;
+      }
+      if (_stopPending || disconnecting || !connected) {
+        _failureCategory = 'TunnelDisconnected';
+        _phase = 'disconnected';
+        _message = 'The tunnel disconnected before its route could be verified.';
+        return false;
+      }
+
+      // Once native status reports CONNECTED, confirm a lightweight HTTPS
+      // request actually traverses this tunnel. This catches DNS and route
+      // failures that a service-only status can otherwise hide.
+      _busy = true;
+      ownsBusy = true;
+      _phase = 'route-health-check';
+      _notify();
+      final routeHealthy = await _verifyConnectedRoute();
+      if (!routeHealthy || !connected) {
+        final cleaned = await _stopNativeAndWait(forceRequest: true);
+        if (!cleaned) {
+          _failureCategory = 'TunnelResetFailed';
+          _phase = 'route-cleanup-failed';
+          _message = 'The route check failed and Android did not confirm cleanup. Retry disconnect before another attempt.';
+        } else {
+          _failureCategory = 'RouteHealthCheckFailed';
+          _phase = 'route-health-failed';
+          _message = 'The VPN started, but the network check through this server failed. The app stopped it and can try another subscription node.';
+        }
+        return false;
+      }
+      _phase = 'connected';
+      _failureCategory = null;
+      _message = null;
+      _notify();
       return true;
     } on Object catch (error) {
-      if (connected) {
-        _awaitingStartStatus = false;
-        _phase = 'connected';
-        _message = null;
-        _failureCategory = null;
-        return true;
-      }
       _awaitingStartStatus = false;
-      _connectWatchdog?.cancel();
-      _connectWatchdog = null;
-      _failureCategory = _categoryFor(error);
+      final timedOut = error is TimeoutException;
       final invalidConfig = error is ArgumentError ||
           error is FormatException ||
           (error is PlatformException && error.code == 'INVALID_CONFIG');
-      _phase = invalidConfig ? 'config-rejected' : 'native-start-failed';
+      _failureCategory = timedOut ? 'ConnectTimeout' : _categoryFor(error);
+      _phase = invalidConfig
+          ? 'config-rejected'
+          : timedOut
+              ? 'connect-timeout'
+              : 'native-start-failed';
       _message = invalidConfig
           ? 'The VPN engine rejected this server configuration before starting. Choose another profile or contact the provider.'
-          : 'Could not start this route. Open connection details to inspect a safe diagnostic.';
+          : timedOut
+              ? 'Android did not finish accepting the connection request in time.'
+              : 'Could not start this route. Open connection details to inspect a safe diagnostic.';
+      _completeConnect(false);
+      // Never convert a failed native start into success merely because a
+      // delayed/stale status callback still says CONNECTED. Reconcile native
+      // state before allowing subscription failover or another start.
+      if (connected ||
+          _status.connectionState == VlessConnectionState.connecting ||
+          timedOut) {
+        final failure = _failureCategory;
+        final failedPhase = _phase;
+        final failureMessage = _message;
+        final cleanupBusyBefore = _busy;
+        _busy = true;
+        final cleaned = await _stopNativeAndWait(forceRequest: true);
+        _busy = cleanupBusyBefore;
+        if (!cleaned) {
+          _failureCategory = 'TunnelResetFailed';
+          _phase = 'start-cleanup-failed';
+          _message = 'The start request failed and Android did not confirm cleanup. Retry disconnect before another attempt.';
+        } else {
+          _failureCategory = failure;
+          _phase = failedPhase;
+          _message = failureMessage;
+        }
+      }
       return false;
     } finally {
-      _busy = false;
+      if (ownsBusy) _busy = false;
       _startPending = false;
-      if (!startAccepted && !connected) _awaitingStartStatus = false;
+      if (!connected) _awaitingStartStatus = false;
+      if (identical(_connectResult, result)) _connectResult = null;
+      if (!result.isCompleted) result.complete(false);
+      _notify();
+    }
+  }
+
+  Future<bool> _stopNativeAndWait({required bool forceRequest}) async {
+    if (!forceRequest && _status.connectionState == VlessConnectionState.disconnected) {
+      _stopPending = false;
+      return true;
+    }
+    _stopPending = true;
+    _awaitingStartStatus = false;
+    _phase = 'stopping';
+    final done = Completer<void>();
+    _disconnectResult = done;
+    _notify();
+    try {
+      await _client.stopVless().timeout(const Duration(seconds: 12));
+      if (_status.connectionState == VlessConnectionState.disconnected) {
+        _stopPending = false;
+        _completeConnect(false);
+        return true;
+      }
+      await done.future.timeout(const Duration(seconds: 5));
+      return _status.connectionState == VlessConnectionState.disconnected;
+    } on Object {
+      _stopPending = false;
+      return false;
+    } finally {
+      if (_status.connectionState != VlessConnectionState.disconnected) {
+        _stopPending = false;
+      }
+      if (identical(_disconnectResult, done)) _disconnectResult = null;
       _notify();
     }
   }
@@ -261,24 +459,43 @@ class VpnEngine extends ChangeNotifier {
     _busy = true;
     _stopPending = true;
     _awaitingStartStatus = false;
-    _connectWatchdog?.cancel();
-    _connectWatchdog = null;
     _phase = 'stopping';
     _message = null;
     _notify();
     try {
-      await _client.stopVless().timeout(const Duration(seconds: 20));
+      final stopped = await _stopNativeAndWait(forceRequest: true);
+      if (!stopped) {
+        _failureCategory = 'StopTimeout';
+        _phase = 'stop-timeout';
+        _message = 'Android has not confirmed disconnect yet. Retry disconnect before starting another route.';
+        return false;
+      }
+      _phase = 'disconnected';
+      _failureCategory = null;
+      _message = null;
       return true;
-    } on Object catch (error) {
-      _stopPending = false;
-      _failureCategory = _categoryFor(error);
-      _phase = 'stop-failed';
-      _message = 'Could not stop the VPN yet. Please retry disconnecting.';
-      return false;
     } finally {
       _busy = false;
       _notify();
     }
+  }
+
+  Future<bool> _verifyConnectedRoute() async {
+    for (final url in _probeUrls) {
+      try {
+        final result = await _client
+            .getConnectedServerDelay(url: url)
+            .timeout(const Duration(seconds: 3));
+        if (result >= 0) {
+          _lastPingMs = result;
+          return true;
+        }
+      } on Object catch (error) {
+        _failureCategory = _categoryFor(error);
+      }
+    }
+    _lastPingMs = null;
+    return false;
   }
 
   Future<int?> measurePing(VpnProfile profile) async {
@@ -290,43 +507,31 @@ class VpnEngine extends ChangeNotifier {
     _lastPingMs = null;
     _notify();
     try {
-      var shouldProbeProfile = !connected;
-      if (connected) {
+      for (final url in _probeUrls) {
         try {
-          final result = await _client
-              .getConnectedServerDelay()
-              .timeout(const Duration(seconds: 15));
+          final result = connected
+              ? await _client
+                  .getConnectedServerDelay(url: url)
+                  .timeout(const Duration(seconds: 5))
+              : await _client
+                  .getServerDelay(config: profile.config, url: url)
+                  .timeout(const Duration(seconds: 5));
           if (result >= 0) {
             _lastPingMs = result;
-          } else {
-            shouldProbeProfile = true;
+            break;
           }
         } on Object catch (error) {
           _failureCategory = _categoryFor(error);
-          shouldProbeProfile = true;
-        }
-      }
-      if (shouldProbeProfile) {
-        for (final url in _probeUrls) {
-          try {
-            final result = await _client
-                .getServerDelay(config: profile.config, url: url)
-                .timeout(const Duration(seconds: 15));
-            if (result >= 0) {
-              _lastPingMs = result;
-              break;
-            }
-          } on Object catch (error) {
-            _failureCategory = _categoryFor(error);
-          }
         }
       }
       if (_lastPingMs == null) {
         _phase = 'latency-failed';
         _failureCategory ??= 'NoDelayResult';
-        _message = 'Could not get a latency result. Try another profile or review connection details.';
+        _message = connected
+            ? 'The VPN is active, but the network health check did not get a response. Try another server or review DNS/network settings.'
+            : 'Could not get a latency result. Try another profile or review connection details.';
       } else {
-        _phase = 'latency-ok';
+        _phase = connected ? 'connected' : 'latency-ok';
         _failureCategory = null;
       }
       return _lastPingMs;
@@ -349,7 +554,7 @@ class VpnEngine extends ChangeNotifier {
     try {
       final native = await _client
           .getProviderDebugSnapshot()
-          .timeout(const Duration(seconds: 8));
+          .timeout(const Duration(seconds: 5));
       return '$summary\n\nNative diagnostic output:\n${native.trim().isEmpty ? 'No native diagnostic output was returned.' : native.trim()}';
     } on Object catch (error) {
       return '$summary\n\nNative diagnostic output unavailable (${_categoryFor(error)}).';
@@ -359,7 +564,7 @@ class VpnEngine extends ChangeNotifier {
   @override
   void dispose() {
     _disposed = true;
-    _connectWatchdog?.cancel();
+    _sessionTicker?.cancel();
     super.dispose();
   }
 }

@@ -43,6 +43,10 @@ class V2rayLocalizations {
     if (measured != null) {
       return 'تأخیر مسیر اندازه‌گیری‌شده: ${measured.group(1)} ms';
     }
+    final excluded = RegExp(r'^(\d+) apps excluded from VPN$').firstMatch(source);
+    if (excluded != null) {
+      return '${excluded.group(1)} برنامه از VPN مستثنا شده‌اند';
+    }
     final profileLine = source.split('\n');
     if (profileLine.length == 2 &&
         profileLine[1].startsWith('Country not looked up · ')) {
@@ -70,7 +74,7 @@ class V2rayLocalizations {
     'Your quiet corner of the internet.': 'گوشه‌ای آرام از اینترنت، برای شما.',
     'A clean route, on your terms.': 'مسیری امن و مطابق خواستهٔ شما.',
     'Import a server before connecting': 'پیش از اتصال، یک سرور وارد کنید',
-    'Protected route active on this Android device': 'مسیر امن روی این دستگاه Android فعال است',
+    'VPN service is connected. Test latency to verify network access.': 'سرویس VPN متصل است. برای بررسی دسترسی شبکه، تأخیر را آزمایش کنید.',
     'Waiting for the Android tunnel status…': 'در انتظار وضعیت تونل Android…',
     'Waiting for Android to confirm disconnect…': 'در انتظار تأیید قطع اتصال از Android…',
     'Waiting for a verified VPN status before starting.': 'برای شروع، در انتظار تأیید وضعیت VPN هستیم.',
@@ -92,6 +96,10 @@ class V2rayLocalizations {
     'connected': 'متصل',
     'ready': 'آماده',
     'Live traffic stats appear after a real connection.': 'آمار زندهٔ ترافیک پس از اتصال واقعی نمایش داده می‌شود.',
+    'LIVE SPEED': 'سرعت زنده',
+    'SESSION TOTAL': 'مجموع این نشست',
+    'CONNECTED TIME': 'مدت اتصال',
+    'Latency': 'تأخیر',
     'Test latency': 'آزمایش تأخیر',
     'Import server': 'وارد کردن سرور',
     'View servers': 'نمایش سرورها',
@@ -124,13 +132,21 @@ class V2rayLocalizations {
     'Reduce decorative motion': 'کاهش حرکت‌های تزئینی',
     'Show destination address': 'نمایش نشانی مقصد',
     'Hides the server address in the UI': 'نشانی سرور را در برنامه پنهان می‌کند',
+    'Bypass apps': 'مستثناکردن برنامه‌ها',
+    'No apps excluded': 'هیچ برنامه‌ای مستثنا نشده است',
+    'Choose apps whose traffic should use the normal connection.': 'برنامه‌هایی را انتخاب کنید که ترافیکشان از اتصال عادی عبور کند.',
+    'Could not list apps on this device. Restart the app and try again.': 'فهرست برنامه‌های این دستگاه دریافت نشد. برنامه را دوباره باز و تلاش کنید.',
+    'No apps with a launcher icon were found.': 'برنامه‌ای دارای آیکون در فهرست برنامه‌ها پیدا نشد.',
+    'Could not save app routing choices.': 'ذخیرهٔ انتخاب‌های مسیریابی برنامه‌ها ممکن نشد.',
+    'Disconnect before changing app routing.': 'پیش از تغییر مسیریابی برنامه‌ها، اتصال را قطع کنید.',
+    'Apply': 'اعمال',
     'App language': 'زبان برنامه',
     'Choose the language used throughout the app': 'زبان مورد استفاده در سراسر برنامه را انتخاب کنید',
     'English': 'English',
     'فارسی': 'فارسی',
     'Platform scope': 'محدودهٔ پشتیبانی پلتفرم',
-    'The Android tunnel uses the native Xray-backed VPN service. iPhone still needs its Network Extension project, Apple signing, and device testing. DNS policy, kill switch, auto-connect, and trusted country lookup are not enabled in this build.': 'تونل Android از سرویس VPN بومی مبتنی بر Xray استفاده می‌کند. نسخهٔ iPhone هنوز به پروژهٔ Network Extension، امضای Apple و آزمایش روی دستگاه نیاز دارد. سیاست DNS، قطع اضطراری اتصال (kill switch)، اتصال خودکار و بررسی معتبر کشور در این نسخه فعال نیستند.',
-    'V2rayAG VPN': 'V2rayAG VPN',
+    'Android VPN sessions route system DNS through the selected proxy. You can exclude selected launcher apps from the VPN. iPhone still needs its Network Extension project, Apple signing, and device testing. A kill switch, auto-connect, and trusted country lookup are not enabled in this build.': 'نشست‌های VPN در Android درخواست‌های DNS سیستم را از پراکسی انتخاب‌شده عبور می‌دهند. می‌توانید برنامه‌های انتخاب‌شده از فهرست برنامه‌های دارای آیکون را از VPN مستثنا کنید. نسخهٔ iPhone هنوز به پروژهٔ Network Extension، امضای Apple و آزمایش روی دستگاه نیاز دارد. قطع اضطراری اتصال (kill switch)، اتصال خودکار و بررسی معتبر کشور در این نسخه فعال نیستند.',
+    'V2rayAG': 'V2rayAG',
     'Source: Telegram @V2rayAG\nDeveloper: V2rayAG telegram channel and HashtagAlireza': 'منبع: تلگرام @V2rayAG\nتوسعه‌دهنده: کانال تلگرام V2rayAG و HashtagAlireza',
     'Clipboard is empty.': 'حافظهٔ موقت خالی است.',
     'Could not read the clipboard.': 'خواندن حافظهٔ موقت ممکن نشد.',
@@ -169,6 +185,16 @@ class V2rayLocalizations {
     'The VPN engine rejected this server configuration before starting. Choose another profile or contact the provider.': 'موتور VPN پیکربندی این سرور را پیش از شروع نپذیرفت. نمایهٔ دیگری انتخاب کنید یا با ارائه‌دهنده تماس بگیرید.',
     'The tunnel is taking longer than expected. The app has not confirmed a working connection.': 'اتصال تونل بیش از حد انتظار طول کشیده است. برنامه هنوز اتصال فعال را تأیید نکرده است.',
     'The tunnel disconnected unexpectedly. Check the server, profile, and network.': 'تونل به‌طور غیرمنتظره قطع شد. سرور، نمایه و شبکه را بررسی کنید.',
+    'The tunnel stopped before a working session was confirmed. Check the server, profile, and network.': 'تونل پیش از تأیید نشست فعال متوقف شد. سرور، نمایه و شبکه را بررسی کنید.',
+    'The app did not receive confirmation of a working tunnel in time.': 'برنامه در مهلت مقرر تأیید تونل فعال را دریافت نکرد.',
+    'The server did not confirm a working connection in time.': 'سرور در مهلت مقرر اتصال فعال را تأیید نکرد.',
+    'Android did not finish accepting the connection request in time.': 'Android درخواست اتصال را در مهلت مقرر نپذیرفت.',
+    'The connection timed out and Android did not confirm cleanup. Retry disconnect before starting another server.': 'اتصال مهلت‌دار شد و Android پاک‌سازی را تأیید نکرد. پیش از شروع سرور دیگر، قطع اتصال را دوباره بزنید.',
+    'The start request failed and Android did not confirm cleanup. Retry disconnect before another attempt.': 'درخواست شروع شکست خورد و Android پاک‌سازی را تأیید نکرد. پیش از تلاش دوباره، قطع اتصال را بزنید.',
+    'Android has not confirmed disconnect yet. Retry disconnect before starting another route.': 'Android هنوز قطع اتصال را تأیید نکرده است. پیش از شروع مسیر دیگر، دوباره قطع اتصال را بزنید.',
+    'The VPN is active, but the network health check did not get a response. Try another server or review DNS/network settings.': 'VPN فعال است، اما بررسی سلامت شبکه پاسخی نگرفت. سرور دیگری را امتحان کنید یا تنظیمات DNS و شبکه را بررسی کنید.',
+    'No subscription server passed the live network check. Try another network or refresh the server list.': 'هیچ سروری از اشتراک از بررسی زندهٔ شبکه عبور نکرد. شبکهٔ دیگری را امتحان یا فهرست سرورها را تازه‌سازی کنید.',
+
     'Could not get a latency result. Try another profile or review connection details.': 'نتیجهٔ تأخیر دریافت نشد. نمایهٔ دیگری را امتحان کنید یا جزئیات اتصال را بررسی کنید.',
     'The subscription has too many or incomplete redirects. Ask the provider for its direct HTTPS URL.': 'اشتراک تغییرمسیرهای ناقص یا بیش از حد دارد. نشانی مستقیم HTTPS را از ارائه‌دهنده بخواهید.',
     'The subscription redirects outside its HTTPS host. Ask the provider for a direct subscription URL.': 'اشتراک به میزبانی خارج از میزبان HTTPS خودش تغییرمسیر می‌دهد. نشانی مستقیم اشتراک را از ارائه‌دهنده بخواهید.',

@@ -11,11 +11,20 @@ void main() {
       );
     });
 
-    test('does not rotate profiles for permission or platform failures', () {
-      expect(shouldRetryConfigRejectedProfile('VpnPermissionDenied'), isFalse);
+    test('retries a rejected or safely failed individual subscription node', () {
+      expect(shouldRetrySubscriptionProfile('InvalidConfiguration'), isTrue);
+      expect(shouldRetrySubscriptionProfile('PlatformException:INVALID_CONFIG'), isTrue);
+      expect(shouldRetrySubscriptionProfile('TunnelDisconnected'), isTrue);
+      expect(shouldRetrySubscriptionProfile('ConnectTimeout'), isTrue);
+      expect(shouldRetrySubscriptionProfile('RouteHealthCheckFailed'), isTrue);
+    });
+
+    test('does not rotate for permission, unresolved cleanup, or generic platform failures', () {
+      expect(shouldRetrySubscriptionProfile('VpnPermissionDenied'), isFalse);
+      expect(shouldRetrySubscriptionProfile('TunnelResetFailed'), isFalse);
+      expect(shouldRetrySubscriptionProfile('PlatformException:OTHER'), isFalse);
+      expect(shouldRetrySubscriptionProfile(null), isFalse);
       expect(shouldRetryConfigRejectedProfile('Timeout'), isFalse);
-      expect(shouldRetryConfigRejectedProfile('PlatformException:OTHER'), isFalse);
-      expect(shouldRetryConfigRejectedProfile(null), isFalse);
     });
   });
 }
