@@ -18,6 +18,16 @@ void main() {
       );
     });
 
+    test('accepts mixed-case schemes without changing link payload case', () {
+      final profile = ProfileParser.parse(
+        'VLESS://Secret-User@example.org:443#MiXeD-Label',
+      );
+      expect(profile.protocol, 'VLESS');
+      expect(profile.destination, 'example.org:443');
+      expect(profile.name, 'MiXeD-Label');
+      expect(ProfileParser.normalizeScheme('VMESS://AbC'), 'vmess://AbC');
+    });
+
     test('extracts metadata from a VMess share link', () {
       final payload = base64.encode(utf8.encode(jsonEncode({
         'add': 'vmess.example.net',

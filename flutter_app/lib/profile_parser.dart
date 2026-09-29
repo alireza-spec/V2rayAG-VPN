@@ -23,10 +23,19 @@ class ParsedProfile {
 class ProfileParser {
   static const _supported = {'vless', 'vmess', 'ss', 'trojan'};
 
-  static ParsedProfile parse(String rawInput) {
+  /// Trims input and normalizes only the URI scheme's letter case.
+  /// The remainder (including case-sensitive credentials) is preserved.
+  static String normalizeScheme(String rawInput) {
     final input = rawInput.trim();
-    final scheme = input.split('://').first.toLowerCase();
-    if (!_supported.contains(scheme) || !input.startsWith('$scheme://')) {
+    final separator = input.indexOf('://');
+    if (separator < 1) return input;
+    return '${input.substring(0, separator).toLowerCase()}://${input.substring(separator + 3)}';
+  }
+
+  static ParsedProfile parse(String rawInput) {
+    final input = normalizeScheme(rawInput);
+    final scheme = input.split('://').first;
+    if (!_supported.contains(scheme)) {
       throw const FormatException(
         'Paste one VLESS, VMess, Shadowsocks, or Trojan server link.',
       );

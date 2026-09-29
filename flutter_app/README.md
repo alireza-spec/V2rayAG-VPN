@@ -1,37 +1,51 @@
-# V2rayAG VPN — Flutter foundation
+# V2rayAG VPN — Flutter client
 
-Flutter client foundation for **V2rayAG VPN**.
+A mobile VPN app by **V2rayAG telegram channel and HashtagAlireza**. Official channel: [@V2rayAG](https://t.me/V2rayAG).
 
-- Source: Telegram [@V2rayAG](https://t.me/V2rayAG)
-- Developer: V2rayAG telegram channel and HashtagAlireza
+## Current implementation
 
-## Current milestone
+- The original Flutter UI remains, with actual connect/disconnect, OS VPN permission, engine status, traffic counters, and latency calls wired to `flutter_vless` 1.1.6 on Android.
+- Share-link parsing for VLESS, VMess, Shadowsocks, and Trojan uses the Xray-backed plugin.
+- Connection config is held in app memory and handed to the native engine only when connecting. The Flutter app does not write it to preferences or log it. Native runtime retention and diagnostic behavior have not yet been audited; do not commit live configs or share diagnostics/screenshots containing server details.
+- The app never obtains or displays the device/source/public IP. It shows the destination host and port from the imported profile. Country remains explicitly unknown until a trusted, privacy-reviewed metadata source is chosen.
+- Subscription URL fetching, persistent Flutter-side profile storage, and country geolocation are not enabled.
 
-This Flutter app provides a responsive mobile interface, local light/dark and accessibility preferences, and a single-link **metadata preview** for VLESS, VMess, Shadowsocks, and Trojan share links.
+## Platform status
 
-It is **not a VPN client yet**: there is no tunnel engine, no traffic routing, no live ping, no IP geolocation, no notification service, and no Android/iOS VPN service integration. The connect control is intentionally inactive. Imported links are parsed in memory for a preview; the original URI and credentials are discarded, and no subscription URL is fetched or stored.
+The Dart connect flow currently targets Android. It refuses to start another tunnel until the native engine explicitly reports `disconnected`, and it permits stopping a pending startup. If status remains unknown, connecting stays disabled rather than guessing whether a system VPN is already active. The native Android project folder has not been generated in this repository yet, so an APK has **not** been built or device-tested. The selected plugin's Android backend uses `VpnService`; its docs require Android minSdk 23 or newer.
 
-The app never obtains or displays the device's public/source IP. It displays only the host and port from the selected server link. A country is shown as unknown until trusted server metadata is integrated; this milestone does not perform geolocation.
+iPhone is not configured yet. It requires an iOS Packet Tunnel / Network Extension target, App Group and shared Keychain setup, Apple Developer signing, and physical-device tests. The Dart engine intentionally reports Android-only until that integration is completed. Web is a management companion only and cannot tunnel all device traffic.
 
-## Run
+## Generate and run Android locally
 
-Install Flutter (3.27 or newer) and the Android or iOS toolchain, then:
+Install Flutter 3.27+ and the Android SDK/Android Studio. From this folder:
 
 ```sh
+flutter create --platforms=android --project-name=v2rayag_vpn .
 flutter pub get
 flutter test
-flutter run
+flutter analyze
+flutter run -d android
 ```
 
-Flutter platform folders (`android/`, `ios/`, and web build scaffolding) are generated with `flutter create` as a separate setup step. No signing credentials or live VPN configs belong in Git.
+If Android packaging requires it, follow the plugin's documented Gradle native-library extraction setting (`useLegacyPackaging = true`). Keep generated signing files local and out of Git.
 
-## Next engineering milestones
+Use a server link you control for device testing. Never commit credentials, UUIDs, passwords, subscription URLs, signing keys, or private certificates.
 
-1. Generate and validate Android and iOS Flutter platform projects.
-2. Select a maintained VPN core and confirm its licensing, protocol coverage, platform support, and update/security posture before integration.
-3. Design a secure configuration model and encrypted local storage; implement subscription URL fetching only with clear consent and careful redirect/secret handling.
-4. Add Android `VpnService` integration and test on real devices; then handle Apple's Network Extension entitlement, signing, and iOS integration.
-5. Add real server metadata and latency checks without querying or displaying a user's source IP.
-6. Add integration tests and release builds. Web remains a management companion, not a device-wide VPN tunnel.
+## Core and source references
 
-The prototype remains in `prototype/`; this folder is the Flutter app source foundation.
+- Flutter wrapper: [`flutter_vless`](https://pub.dev/packages/flutter_vless) v1.1.6 (MIT wrapper; preserve its notices).
+- Native Xray runtimes have their own bundled notices and licensing. Review and ship the exact required notices before release; this project does not make a legal determination.
+- [Android integration guide](https://github.com/XIIIFOX/flutter_vless/blob/main/doc/platform/android.md)
+- [iOS integration guide](https://github.com/XIIIFOX/flutter_vless/blob/main/doc/platform/ios.md)
+- [Security boundaries](https://github.com/XIIIFOX/flutter_vless/blob/main/doc/security.md)
+
+## Still to build
+
+1. Generate/check in Android platform scaffolding and run real-device tests.
+2. Verify the Xray runtime notices and dependency checksums in release builds.
+3. Add secure profile storage and explicit-consent subscription refresh.
+4. Add the iPhone extension, entitlements, signing, and device testing.
+5. Add trusted server-country metadata without any lookup or display of the user's source IP.
+
+The earlier interactive prototype remains in `../prototype/`.
