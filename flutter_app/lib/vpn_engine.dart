@@ -11,8 +11,7 @@ bool shouldRetrySubscriptionProfile(String? category) =>
     category == 'InvalidConfiguration' ||
     category == 'PlatformException:INVALID_CONFIG' ||
     category == 'TunnelDisconnected' ||
-    category == 'ConnectTimeout' ||
-    category == 'RouteHealthCheckFailed';
+    category == 'ConnectTimeout';
 
 /// Backwards-compatible policy name retained for existing tests/callers.
 bool shouldRetryConfigRejectedProfile(String? category) =>
@@ -311,7 +310,10 @@ class VpnEngine extends ChangeNotifier {
         config: profile.config,
         blockedApps: blockedApps,
         proxyOnly: false,
-        androidDnsPolicy: AndroidDnsPolicy.proxy,
+        // Keep the imported provider configuration intact. Forced proxy-DNS
+        // rewriting can conflict with provider-supplied DNS/routing rules; the
+        // user can still test the selected route explicitly after connecting.
+        androidDnsPolicy: AndroidDnsPolicy.config,
         notificationDisconnectButtonName: 'Disconnect',
       ).timeout(const Duration(seconds: 30));
       _phase = connected ? 'native-connected' : 'waiting-for-connected-status';
@@ -356,27 +358,10 @@ class VpnEngine extends ChangeNotifier {
         return false;
       }
 
-      // Once native status reports CONNECTED, confirm a lightweight HTTPS
-      // request actually traverses this tunnel. This catches DNS and route
-      // failures that a service-only status can otherwise hide.
-      _busy = true;
-      ownsBusy = true;
-      _phase = 'route-health-check';
-      _notify();
-      final routeHealthy = await _verifyConnectedRoute();
-      if (!routeHealthy || !connected) {
-        final cleaned = await _stopNativeAndWait(forceRequest: true);
-        if (!cleaned) {
-          _failureCategory = 'TunnelResetFailed';
-          _phase = 'route-cleanup-failed';
-          _message = 'The route check failed and Android did not confirm cleanup. Retry disconnect before another attempt.';
-        } else {
-          _failureCategory = 'RouteHealthCheckFailed';
-          _phase = 'route-health-failed';
-          _message = 'The VPN started, but the network check through this server failed. The app stopped it and can try another subscription node.';
-        }
-        return false;
-      }
+      // The pinned native engine reports CONNECTED only after its authenticated
+      // packet-path readiness check. Do not tear down a ready tunnel merely
+      // because an external latency endpoint is blocked or unreachable; ping is
+      // measured separately and must not control session ownership.
       _phase = 'connected';
       _failureCategory = null;
       _message = null;
@@ -501,24 +486,6 @@ class VpnEngine extends ChangeNotifier {
       _busy = false;
       _notify();
     }
-  }
-
-  Future<bool> _verifyConnectedRoute() async {
-    for (final url in _probeUrls) {
-      try {
-        final result = await _client
-            .getConnectedServerDelay(url: url)
-            .timeout(const Duration(seconds: 3));
-        if (result >= 0) {
-          _lastPingMs = result;
-          return true;
-        }
-      } on Object catch (error) {
-        _failureCategory = _categoryFor(error);
-      }
-    }
-    _lastPingMs = null;
-    return false;
   }
 
   Future<int?> measurePing(VpnProfile profile) async {

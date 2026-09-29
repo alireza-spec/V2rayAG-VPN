@@ -690,7 +690,6 @@ class _VpnShellState extends State<VpnShell> {
         // trap the user in a long sequence. Manual selection remains available.
         final attemptCount = profiles.length < 8 ? profiles.length : 8;
         var rejectedConfiguration = false;
-        var routeHealthFailed = false;
         for (var index = 0; index < attemptCount; index++) {
           if (!mounted || _cancelAutoConnect) break;
           setState(() => _selectedIndex = index);
@@ -718,9 +717,7 @@ class _VpnShellState extends State<VpnShell> {
           // safely stopped after a route-specific timeout/disconnect. Never
           // rotate while a native tunnel may still be active.
           if (shouldRetrySubscriptionProfile(failure)) {
-            if (failure == 'RouteHealthCheckFailed') {
-              routeHealthFailed = true;
-            } else if (failure == 'InvalidConfiguration' ||
+            if (failure == 'InvalidConfiguration' ||
                 failure == 'PlatformException:INVALID_CONFIG') {
               rejectedConfiguration = true;
             }
@@ -738,11 +735,9 @@ class _VpnShellState extends State<VpnShell> {
               : 'Automatic connection was cancelled.');
           return;
         }
-        _showMessage(routeHealthFailed
-            ? 'No subscription server passed the live network check. Try another network or refresh the server list.'
-            : rejectedConfiguration
-                ? 'The native VPN engine rejected subscription profiles. Refresh the subscription or choose a different server.'
-                : 'No server in the subscription could be started. Check server access or choose another profile.');
+        _showMessage(rejectedConfiguration
+            ? 'The native VPN engine rejected subscription profiles. Refresh the subscription or choose a different server.'
+            : 'No server in the subscription could be started. Check server access or choose another profile.');
       } else {
         _showMessage('Loaded ${profiles.length} server profiles into app memory.');
       }

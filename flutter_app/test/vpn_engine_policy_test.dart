@@ -16,7 +16,9 @@ void main() {
       expect(shouldRetrySubscriptionProfile('PlatformException:INVALID_CONFIG'), isTrue);
       expect(shouldRetrySubscriptionProfile('TunnelDisconnected'), isTrue);
       expect(shouldRetrySubscriptionProfile('ConnectTimeout'), isTrue);
-      expect(shouldRetrySubscriptionProfile('RouteHealthCheckFailed'), isTrue);
+      // Third-party HTTP probe failure is not evidence that the native tunnel
+      // failed, so it must never rotate the selected profile.
+      expect(shouldRetrySubscriptionProfile('RouteHealthCheckFailed'), isFalse);
     });
 
     test('does not rotate for permission, unresolved cleanup, or generic platform failures', () {
