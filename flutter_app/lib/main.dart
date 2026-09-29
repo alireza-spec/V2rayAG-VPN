@@ -316,7 +316,7 @@ class _VpnShellState extends State<VpnShell> {
           TextButton.icon(
             onPressed: () async {
               await Clipboard.setData(ClipboardData(text: details));
-              if (!mounted) return;
+              if (!mounted || !dialogContext.mounted) return;
               Navigator.of(dialogContext).pop();
               _showMessage('Copied to clipboard. Review and redact before sharing.');
             },
