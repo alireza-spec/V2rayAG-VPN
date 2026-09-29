@@ -208,8 +208,13 @@ class _VpnShellState extends State<VpnShell> {
   final List<String?> _profileSources = [];
   final VpnEngine _engine = VpnEngine();
   final SubscriptionRepository _subscriptionRepository = SubscriptionRepository();
+  final ProfileRepository _profileRepository = ProfileRepository();
   final Completer<void> _subscriptionsReady = Completer<void>();
+  final Completer<void> _profilesReady = Completer<void>();
   final Completer<void> _routingPreferencesReady = Completer<void>();
+  Future<void> _profileWriteQueue = Future<void>.value();
+  bool _profileRestoreFailed = false;
+  bool _subscriptionRestoreFailed = false;
   List<SavedSubscription> _savedSubscriptions = [];
   bool _subscriptionBusy = false;
   int? _selectedIndex;
@@ -235,7 +240,18 @@ class _VpnShellState extends State<VpnShell> {
     _engine.addListener(_onEngineChanged);
     _engine.initialize();
     _restoreSubscriptions();
+    _restoreProfiles();
     _restoreExcludedPackages();
+  }
+
+  String _safeStorageFailure(Object error) {
+    if (error is PlatformException) {
+      final code = error.code.replaceAll(RegExp(r'[^A-Za-z0-9_.-]'), '');
+      return code.isEmpty ? 'PlatformException' : code;
+    }
+    if (error is MissingPluginException) return 'MissingPluginException';
+    if (error is FormatException) return 'InvalidStoredData';
+    return 'SecureStorageError';
   }
 
   Future<void> _restoreSubscriptions() async {
@@ -254,10 +270,70 @@ class _VpnShellState extends State<VpnShell> {
         }
       }
       if (mounted) setState(() => _savedSubscriptions = personal);
-    } on Object {
-      if (mounted) _showMessage('Secure subscription storage is unavailable on this device.');
+    } on Object catch (error) {
+      _subscriptionRestoreFailed = true;
+      if (mounted) {
+        _showMessage('Subscription storage could not be read (${_safeStorageFailure(error)}). Existing secure data will not be overwritten.');
+      }
     } finally {
       if (!_subscriptionsReady.isCompleted) _subscriptionsReady.complete();
+    }
+  }
+
+  Future<void> _restoreProfiles() async {
+    try {
+      final saved = await _profileRepository.read();
+      if (!mounted) return;
+      setState(() {
+        _profiles
+          ..clear()
+          ..addAll(saved.profiles);
+        _profileSources
+          ..clear()
+          ..addAll(saved.sources);
+        _selectedIndex = saved.selectedIndex;
+      });
+    } on Object catch (error) {
+      _profileRestoreFailed = true;
+      if (mounted) {
+        _showMessage(
+          'Saved profiles could not be restored (${_safeStorageFailure(error)}). Existing secure data will not be overwritten.',
+        );
+      }
+    } finally {
+      if (!_profilesReady.isCompleted) _profilesReady.complete();
+    }
+  }
+
+  Future<bool> _persistProfiles() async {
+    await _profilesReady.future;
+    if (_profileRestoreFailed) {
+      if (mounted) {
+        _showMessage('Profile storage could not be read; refusing to overwrite its existing data.');
+      }
+      return false;
+    }
+    final profiles = List<VpnProfile>.unmodifiable(_profiles);
+    final sources = List<String?>.unmodifiable(_profileSources);
+    final selectedIndex = _selectedIndex;
+    final write = _profileWriteQueue
+        .catchError((Object _) {})
+        .then<void>((_) => _profileRepository.save(
+              profiles: profiles,
+              sources: sources,
+              selectedIndex: selectedIndex,
+            ));
+    _profileWriteQueue = write;
+    try {
+      await write;
+      return true;
+    } on Object catch (error) {
+      if (mounted) {
+        _showMessage(
+          'Profiles could not be saved securely (${_safeStorageFailure(error)}); changes remain only until this app closes.',
+        );
+      }
+      return false;
     }
   }
 
@@ -582,15 +658,18 @@ class _VpnShellState extends State<VpnShell> {
   }
 
   void _selectProfile(int index) {
-    if (_subscriptionBusy) return;
+    if (_subscriptionBusy || !_profilesReady.isCompleted) return;
     if (_engine.connected || _engine.connecting || _engine.disconnecting) {
       _showMessage('Disconnect before changing the active server.');
       return;
     }
     setState(() => _selectedIndex = index);
+    unawaited(_persistProfiles().then<void>((_) {}));
   }
 
   Future<void> _importProfile() async {
+    await _profilesReady.future;
+    if (!mounted) return;
     if (_subscriptionBusy) {
       _showMessage('Wait for the subscription operation to finish.');
       return;
@@ -627,7 +706,10 @@ class _VpnShellState extends State<VpnShell> {
       _selectedIndex ??= firstNewIndex;
       _tab = 1;
     });
-    _showMessage('Added ${added.length} server profiles to this session.');
+    final saved = await _persistProfiles();
+    if (mounted && saved) {
+      _showMessage('Added ${added.length} server profiles and saved them securely.');
+    }
   }
 
   Future<SavedSubscription?> _editSubscription({SavedSubscription? existing}) {
@@ -647,6 +729,10 @@ class _VpnShellState extends State<VpnShell> {
   Future<_SubscriptionSaveChoice> _saveSubscription(
     SavedSubscription subscription,
   ) async {
+    if (_subscriptionRestoreFailed) {
+      _showMessage('Subscription storage could not be read; refusing to overwrite its existing data.');
+      return _SubscriptionSaveChoice.cancelled;
+    }
     final next = [..._savedSubscriptions];
     final index = next.indexWhere((item) => item.id == subscription.id);
     if (index < 0) {
@@ -718,7 +804,12 @@ class _VpnShellState extends State<VpnShell> {
   Future<void> _removeSubscription(SavedSubscription subscription) async {
     if (_subscriptionBusy || _engine.connected || _engine.connecting || _engine.disconnecting) return;
     await _subscriptionsReady.future;
+    await _profilesReady.future;
     if (!mounted) return;
+    if (_subscriptionRestoreFailed) {
+      _showMessage('Subscription storage could not be read; refusing to overwrite its existing data.');
+      return;
+    }
     final next = _savedSubscriptions.where((item) => item.id != subscription.id).toList();
     final selectedConfig = _selectedIndex != null && _selectedIndex! < _profiles.length
         ? _profiles[_selectedIndex!].config
@@ -749,7 +840,10 @@ class _VpnShellState extends State<VpnShell> {
             : _profiles.indexWhere((profile) => profile.config == selectedConfig);
         if (_selectedIndex != null && _selectedIndex! < 0) _selectedIndex = null;
       });
-      _showMessage('Saved subscription removed from this device.');
+      final profilesSaved = await _persistProfiles();
+      if (mounted && profilesSaved) {
+        _showMessage('Saved subscription and its profiles were removed from this device.');
+      }
     } on Object {
       _showMessage('Could not remove the saved subscription.');
     }
@@ -757,6 +851,8 @@ class _VpnShellState extends State<VpnShell> {
 
   Future<void> _refreshSubscription(SavedSubscription subscription) async {
     if (_subscriptionBusy) return;
+    await _profilesReady.future;
+    if (!mounted) return;
     if (_engine.connected || _engine.connecting || _engine.disconnecting) {
       _showMessage('Disconnect before refreshing subscriptions.');
       return;
@@ -809,7 +905,10 @@ class _VpnShellState extends State<VpnShell> {
                 : null);
         _tab = 1;
       });
-      _showMessage('Loaded ${profiles.length} profiles for ${subscription.name}.');
+      final saved = await _persistProfiles();
+      if (mounted && saved) {
+        _showMessage('Loaded and saved ${profiles.length} profiles for ${subscription.name}.');
+      }
     } on FormatException catch (error) {
       // Show only fixed, credential-free parser/fetch messages.
       if (mounted) _showMessage(error.message);
@@ -840,6 +939,7 @@ class _VpnShellState extends State<VpnShell> {
         _selectedIndex = _selectedIndex! - 1;
       }
     });
+    unawaited(_persistProfiles().then<void>((_) {}));
   }
 
   @override
@@ -1499,7 +1599,7 @@ class _ProfilesPage extends StatelessWidget {
             .map((index) => _profileCard(context, index, dark)),
       ],
       const SizedBox(height: 12),
-      const LocalizedText('Profile configs exist only in app memory during this session. Do not share screenshots or logs that reveal a server address.', style: TextStyle(fontSize: 12, color: _muted, height: 1.45)),
+      const LocalizedText('Profile configurations are encrypted in Android secure storage on this device. If secure storage is unavailable, changes remain session-only and the app shows a diagnostic code. Do not share screenshots or logs that reveal a server address.', style: TextStyle(fontSize: 12, color: _muted, height: 1.45)),
     ]);
   }
 }

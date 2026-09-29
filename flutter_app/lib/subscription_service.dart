@@ -32,7 +32,12 @@ class SubscriptionRepository {
   SubscriptionRepository({FlutterSecureStorage? storage})
       : _storage = storage ??
             FlutterSecureStorage(
-              aOptions: AndroidOptions(migrateWithBackup: true),
+              // Preserve crash-safe cipher migration, but never silently reset
+              // encrypted records when Android Keystore cannot unwrap a key.
+              aOptions: AndroidOptions(
+                migrateWithBackup: true,
+                resetOnError: false,
+              ),
             );
 
   static const _key = 'saved_subscriptions_v1';
@@ -58,6 +63,96 @@ class SubscriptionRepository {
         key: _key,
         value: jsonEncode(subscriptions.map((item) => item.toJson()).toList()),
       );
+}
+
+/// Profiles include credentials, so this repository uses the same encrypted
+/// platform storage as subscription URLs and never falls back to plain prefs.
+class StoredProfileState {
+  const StoredProfileState({
+    required this.profiles,
+    required this.sources,
+    required this.selectedIndex,
+  });
+
+  final List<VpnProfile> profiles;
+  final List<String?> sources;
+  final int? selectedIndex;
+
+  static const empty = StoredProfileState(
+    profiles: [],
+    sources: [],
+    selectedIndex: null,
+  );
+}
+
+class ProfileRepository {
+  ProfileRepository({FlutterSecureStorage? storage})
+      : _storage = storage ??
+            FlutterSecureStorage(
+              aOptions: AndroidOptions(
+                migrateWithBackup: true,
+                resetOnError: false,
+              ),
+            );
+
+  static const _key = 'saved_profiles_v1';
+  final FlutterSecureStorage _storage;
+
+  Future<StoredProfileState> read() async {
+    final raw = await _storage.read(key: _key);
+    if (raw == null || raw.isEmpty) return StoredProfileState.empty;
+    final decoded = jsonDecode(raw);
+    if (decoded is! Map<String, dynamic> || decoded['profiles'] is! List) {
+      throw const FormatException('Saved profile data is invalid.');
+    }
+    final profiles = <VpnProfile>[];
+    final sources = <String?>[];
+    for (final item in decoded['profiles'] as List) {
+      if (item is! Map<String, dynamic> || item['profile'] is! Map) {
+        throw const FormatException('A saved profile record is invalid.');
+      }
+      final profile = VpnProfile.fromJson(
+        Map<String, dynamic>.from(item['profile'] as Map),
+      );
+      final source = item['sourceId'];
+      if (source != null && source is! String) {
+        throw const FormatException('A saved profile source is invalid.');
+      }
+      profiles.add(profile);
+      sources.add(source as String?);
+    }
+    final selectedValue = decoded['selectedIndex'];
+    final selected = selectedValue is int &&
+            selectedValue >= 0 && selectedValue < profiles.length
+        ? selectedValue
+        : null;
+    return StoredProfileState(
+      profiles: profiles,
+      sources: sources,
+      selectedIndex: selected,
+    );
+  }
+
+  Future<void> save({
+    required List<VpnProfile> profiles,
+    required List<String?> sources,
+    required int? selectedIndex,
+  }) async {
+    if (profiles.length != sources.length) {
+      throw ArgumentError('Profile and source counts do not match.');
+    }
+    final value = jsonEncode({
+      'profiles': [
+        for (var i = 0; i < profiles.length; i++)
+          {
+            'sourceId': sources[i],
+            'profile': profiles[i].toJson(),
+          },
+      ],
+      'selectedIndex': selectedIndex,
+    });
+    await _storage.write(key: _key, value: value);
+  }
 }
 
 class SubscriptionService {
@@ -145,7 +240,8 @@ class SubscriptionService {
   }
 
   /// Parses provider payloads through the same maintained parser used to create
-  /// the native Xray profiles. Individual credentials remain only in memory.
+  /// native Xray profiles. Returned credentials may only be persisted through
+  /// ProfileRepository, which uses platform secure storage.
   static List<VpnProfile> parsePayload(String payload) {
     final profiles = <VpnProfile>[];
     try {

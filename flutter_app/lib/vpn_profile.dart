@@ -3,8 +3,8 @@ import 'package:flutter_vless/url/xray_config_validator.dart';
 
 import 'profile_parser.dart';
 
-/// A server profile held only in app memory for the current run.
-/// `config` contains credentials; never log, stringify, or persist it unencrypted.
+/// A server profile. `config` contains credentials and may only be serialized
+/// for storage through platform secure storage; never log or expose it.
 class VpnProfile {
   const VpnProfile({
     required this.summary,
@@ -18,12 +18,48 @@ class VpnProfile {
   String get protocol => summary.protocol;
   String get destination => summary.destination;
 
+  /// Includes secret config data. Call only from the secure-storage repository.
+  Map<String, Object> toJson() => {
+        'config': config,
+        'name': summary.name,
+        'protocol': summary.protocol,
+        'host': summary.host,
+        'port': summary.port,
+      };
+
+  /// Restores an encrypted local profile and validates its Xray shape again.
+  factory VpnProfile.fromJson(Map<String, dynamic> json) {
+    final config = json['config'];
+    if (config is! String || config.trim().isEmpty) {
+      throw const FormatException('Saved profile has no configuration.');
+    }
+    final decoded = const XrayConfigValidator().validateJsonString(config);
+    if (decoded['outbounds'] is! List ||
+        (decoded['outbounds'] as List).isEmpty) {
+      throw const FormatException('Saved profile has no usable outbound.');
+    }
+    final name = (json['name'] ?? '').toString().trim();
+    final protocol = (json['protocol'] ?? '').toString().trim();
+    final host = (json['host'] ?? '').toString().trim();
+    final portValue = json['port'];
+    final port = portValue is int ? portValue : int.tryParse('$portValue') ?? 0;
+    return VpnProfile(
+      summary: ParsedProfile(
+        name: name.isEmpty ? 'Saved server' : name,
+        protocol: protocol.isEmpty ? 'Imported' : protocol,
+        host: host.isEmpty ? 'Saved configuration' : host,
+        port: port >= 0 && port <= 65535 ? port : 0,
+      ),
+      config: config,
+    );
+  }
+
   static VpnProfile fromShareLink(String input) =>
       fromParsed(FlutterVless.parse(ProfileParser.normalizeScheme(input)));
 
   /// Builds a runtime profile from the package's canonical parser output.
-  /// This accepts all import formats understood by flutter_vless, including
-  /// subscription JSON/YAML, while keeping the full config only in memory.
+  /// This accepts supported formats understood by flutter_vless; the full
+  /// config must be persisted only through the encrypted profile repository.
   static VpnProfile fromParsed(FlutterVlessURL parsed) {
     final config = parsed.getFullConfiguration();
     final decoded = const XrayConfigValidator().validateJsonString(config);
