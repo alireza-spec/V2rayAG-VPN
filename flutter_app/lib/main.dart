@@ -517,7 +517,9 @@ class _VpnShellState extends State<VpnShell> {
 
   Future<void> _testProfileLatency(int index) async {
     if (_subscriptionBusy || _batchPingSubscriptionId != null || _engine.connected ||
-        _engine.connecting || _engine.disconnecting || _engine.busy) return;
+        _engine.connecting || _engine.disconnecting || _engine.busy) {
+      return;
+    }
     if (index < 0 || index >= _profiles.length || _probingProfiles.contains(index)) return;
     final result = await _probeProfile(index);
     if (result == null && mounted && _engine.message != null) {
@@ -527,7 +529,9 @@ class _VpnShellState extends State<VpnShell> {
 
   Future<void> _testSubscriptionPings(SavedSubscription subscription) async {
     if (_subscriptionBusy || _batchPingSubscriptionId != null || _engine.connected ||
-        _engine.connecting || _engine.disconnecting || _engine.busy) return;
+        _engine.connecting || _engine.disconnecting || _engine.busy) {
+      return;
+    }
     final indices = <int>[
       for (var i = 0; i < _profiles.length; i++)
         if (i < _profileSources.length && _profileSources[i] == subscription.id) i,
