@@ -148,7 +148,7 @@ class _VersionedSecureStorage {
       namespaceRotated = true;
     } else {
       Error.throwWithStackTrace(
-        primaryError ?? fallbackError ?? StateError('No secure store available.'),
+        primaryError,
         StackTrace.current,
       );
     }
