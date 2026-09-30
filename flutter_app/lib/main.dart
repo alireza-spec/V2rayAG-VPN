@@ -326,7 +326,11 @@ class _VpnShellState extends State<VpnShell> {
     await _profilesReady.future;
     if (_profileRestoreFailed) {
       if (mounted) {
-        _showMessage('Profile storage could not be read (${_profileStorageErrorCode ?? 'Unknown'}); refusing to overwrite existing data.');
+        _showMessage(
+          '${context.tr('Saved profile data cannot be decrypted')} (${_profileStorageErrorCode ?? 'Unknown'}). '
+          '${context.tr('New servers are temporary until secure storage is repaired')} '
+          '${context.tr('Existing unreadable data has not been overwritten')}.',
+        );
       }
       return false;
     }
@@ -361,7 +365,7 @@ class _VpnShellState extends State<VpnShell> {
       builder: (dialogContext) => AlertDialog(
         title: const LocalizedText('Repair secure storage?'),
         content: const LocalizedText(
-          'Android cannot decrypt some saved app data. You can keep it and cancel, or delete only the unreadable subscription/profile records. Deleted records cannot be recovered; you may need to add those subscriptions and profiles again. Other app data is not affected.',
+          'Android cannot decrypt some saved app data. You can keep it and cancel, or delete only the unreadable subscription/profile records. Deleted records cannot be recovered; you may need to add those subscriptions and profiles again. Other app data is not affected. Any servers added during this app session will be kept and saved after repair.',
         ),
         actions: [
           TextButton(
@@ -376,33 +380,40 @@ class _VpnShellState extends State<VpnShell> {
       ),
     );
     if (confirmed != true || !mounted) return;
+    final repairSubscriptions = _subscriptionRestoreFailed;
+    final repairProfiles = _profileRestoreFailed;
     try {
-      if (_subscriptionRestoreFailed) {
+      if (repairSubscriptions) {
         await _subscriptionRepository.deleteSaved();
       }
-      if (_profileRestoreFailed) {
+      if (repairProfiles) {
         await _profileRepository.deleteSaved();
       }
       if (!mounted) return;
       setState(() {
-        if (_subscriptionRestoreFailed) {
-          _savedSubscriptions.clear();
-          _sessionOnlySubscriptionIds.clear();
-          _subscriptionRestoreFailed = false;
-        }
-        if (_profileRestoreFailed) {
-          _profiles.clear();
-          _profileSources.clear();
-          _selectedIndex = null;
-          _profilePings.clear();
-          _profilePingFailures.clear();
-          _failedPings.clear();
-          _probingProfiles.clear();
-          _profileRestoreFailed = false;
-          _profileStorageErrorCode = null;
-        }
+        _subscriptionRestoreFailed = false;
+        _profileRestoreFailed = false;
+        _profileStorageErrorCode = null;
       });
-      _showMessage('Unreadable saved records were removed. You can add servers again.');
+
+      // Preserve servers imported in this live session. The user explicitly
+      // confirmed removal of only the unreadable old records; discarding the
+      // newly imported, still-readable profiles here would be surprising.
+      var subscriptionsSaved = true;
+      if (repairSubscriptions) {
+        try {
+          await _subscriptionRepository.saveAll(_savedSubscriptions);
+          _sessionOnlySubscriptionIds.clear();
+        } on Object {
+          subscriptionsSaved = false;
+        }
+      }
+      var profilesSaved = true;
+      if (repairProfiles) profilesSaved = await _persistProfiles();
+      if (!mounted) return;
+      _showMessage(subscriptionsSaved && profilesSaved
+          ? 'Unreadable old records were removed. Current servers and subscriptions were saved; re-add any old unreadable items you still need.'
+          : 'Unreadable old records were removed, but some current items could not be saved. Keep the app open and try saving again.');
     } on Object catch (error) {
       _showMessage('Secure storage repair failed (${_safeStorageFailure(error)}). Try again; some unreadable records may already have been removed.');
     }
@@ -658,6 +669,8 @@ class _VpnShellState extends State<VpnShell> {
         _profilePingFailures.remove(index);
         _failedPings.remove(index);
       } else {
+        // This is only a failed end-to-end latency probe; a timeout does not
+        // establish that a profile is unusable or justify deleting it.
         _profilePingFailures[index] = _engine.failureCategory ?? 'NoDelayResult';
         _failedPings.add(index);
       }
@@ -1617,8 +1630,8 @@ class _ProfilesPage extends StatelessWidget {
                   style: const TextStyle(color: _muted, fontSize: 12)),
             if (failedPings.contains(index))
               Text(
-                '${context.tr('No ping response')} · ${profilePingFailures[index] ?? 'NoDelayResult'}',
-                style: const TextStyle(color: _coral, fontSize: 12),
+                '${context.tr('Latency probe unavailable')} · ${profilePingFailures[index] ?? 'NoDelayResult'}. ${context.tr('This does not prove the server is offline')}',
+                style: const TextStyle(color: _muted, fontSize: 12),
               ),
           ],
         ),
@@ -1703,7 +1716,7 @@ class _ProfilesPage extends StatelessWidget {
                     : context.tr('Private URL stored on this device')),
                 trailing: Wrap(spacing: 0, children: [
                   IconButton(
-                    tooltip: context.tr(isPinging ? 'Stop ping test' : 'Test all server pings'),
+                    tooltip: context.tr(isPinging ? 'Stop ping test' : 'Test all server latencies'),
                     onPressed: isPinging
                         ? onCancelSubscriptionPings
                         : (connected || subscriptionBusy

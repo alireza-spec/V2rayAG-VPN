@@ -22,6 +22,19 @@ void main() {
     );
   });
 
+  test('Persian explains that a latency timeout does not prove a server is down', () {
+    const localizations = V2rayLocalizations(Locale('fa'));
+    expect(
+      localizations.text('Latency probe unavailable'),
+      'آزمون تأخیر نتیجه نداد',
+    );
+    expect(
+      localizations.text('This does not prove the server is offline'),
+      'این به‌تنهایی آفلاین بودن سرور را ثابت نمی‌کند',
+    );
+    expect(localizations.text('Test all server latencies'), 'آزمایش تأخیر همهٔ سرورها');
+  });
+
   testWidgets('Persian delegate provides RTL directionality', (tester) async {
     await tester.pumpWidget(
       const MaterialApp(
