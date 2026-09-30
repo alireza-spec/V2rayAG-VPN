@@ -35,6 +35,20 @@ void main() {
     expect(localizations.text('Test all server latencies'), 'آزمایش تأخیر همهٔ سرورها');
   });
 
+  test('Persian explains persistent encrypted storage and batch progress', () {
+    const localizations = V2rayLocalizations(Locale('fa'));
+    expect(localizations.text('Testing latencies'), 'در حال سنجش تأخیر سرورها');
+    expect(localizations.text('Secure storage unavailable'), 'فضای امن در دسترس نیست');
+    expect(
+      localizations.text('Secure storage status'),
+      'وضعیت فضای امن',
+    );
+    expect(
+      localizations.text('Some older encrypted profile data remains untouched but cannot be read on this device. New profiles can be saved separately.'),
+      'برخی داده‌های رمزگذاری‌شدهٔ پروفایل قدیمی دست‌نخورده مانده اما در این دستگاه خوانده نمی‌شود. پروفایل‌های جدید جداگانه ذخیره می‌شوند.',
+    );
+  });
+
   testWidgets('Persian delegate provides RTL directionality', (tester) async {
     await tester.pumpWidget(
       const MaterialApp(

@@ -27,6 +27,12 @@ class VpnEngine extends ChangeNotifier {
     'https://cp.cloudflare.com/generate_204',
     'https://www.google.com/generate_204',
   ];
+  // Batch scans use one provider-independent check per node to avoid doing
+  // two sequential fallback requests for hundreds of profiles. An unavailable
+  // result remains unverified; it is never treated as proof of a dead server.
+  static const _batchProbeUrls = <String>[
+    'https://cp.cloudflare.com/generate_204',
+  ];
 
   VlessStatus _status = VlessStatus();
   bool _initialized = false;
@@ -495,7 +501,10 @@ class VpnEngine extends ChangeNotifier {
     }
   }
 
-  Future<int?> measurePing(VpnProfile profile) async {
+  Future<int?> measurePing(
+    VpnProfile profile, {
+    bool batchScan = false,
+  }) async {
     if (!_initialized || _busy || connecting || disconnecting) return null;
     _busy = true;
     _phase = 'latency-check';
@@ -504,15 +513,17 @@ class VpnEngine extends ChangeNotifier {
     _lastPingMs = null;
     _notify();
     try {
-      for (final url in _probeUrls) {
+      final urls = batchScan ? _batchProbeUrls : _probeUrls;
+      final timeout = Duration(seconds: batchScan ? 4 : 5);
+      for (final url in urls) {
         try {
           final result = connected
               ? await _client
                   .getConnectedServerDelay(url: url)
-                  .timeout(const Duration(seconds: 5))
+                  .timeout(timeout)
               : await _client
                   .getServerDelay(config: profile.config, url: url)
-                  .timeout(const Duration(seconds: 5));
+                  .timeout(timeout);
           if (result >= 0) {
             _lastPingMs = result;
             break;

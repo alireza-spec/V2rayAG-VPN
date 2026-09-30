@@ -229,6 +229,8 @@ class _VpnShellState extends State<VpnShell> {
   bool _profileRestoreFailed = false;
   String? _profileStorageErrorCode;
   bool _subscriptionRestoreFailed = false;
+  bool _legacySecureDataUnavailable = false;
+  bool _secureNamespaceRotated = false;
   final Set<String> _sessionOnlySubscriptionIds = {};
   List<SavedSubscription> _savedSubscriptions = [];
   bool _subscriptionBusy = false;
@@ -285,7 +287,16 @@ class _VpnShellState extends State<VpnShell> {
           // Keep the legacy entry hidden even if secure storage is unavailable.
         }
       }
-      if (mounted) setState(() => _savedSubscriptions = personal);
+      _legacySecureDataUnavailable = _legacySecureDataUnavailable ||
+          _subscriptionRepository.legacyDataUnreadable;
+      _secureNamespaceRotated = _secureNamespaceRotated ||
+          _subscriptionRepository.namespaceRotated;
+      if (mounted) {
+        setState(() => _savedSubscriptions = personal);
+        if (_subscriptionRepository.legacyDataUnreadable) {
+          _showMessage('Some older encrypted subscription data remains untouched but cannot be read on this device. New subscriptions can be saved separately.');
+        }
+      }
     } on Object catch (error) {
       _subscriptionRestoreFailed = true;
       if (mounted) {
@@ -299,6 +310,10 @@ class _VpnShellState extends State<VpnShell> {
   Future<void> _restoreProfiles() async {
     try {
       final saved = await _profileRepository.read();
+      _legacySecureDataUnavailable = _legacySecureDataUnavailable ||
+          _profileRepository.legacyDataUnreadable;
+      _secureNamespaceRotated = _secureNamespaceRotated ||
+          _profileRepository.namespaceRotated;
       if (!mounted) return;
       setState(() {
         _profiles
@@ -309,6 +324,9 @@ class _VpnShellState extends State<VpnShell> {
           ..addAll(saved.sources);
         _selectedIndex = saved.selectedIndex;
       });
+      if (_profileRepository.legacyDataUnreadable) {
+        _showMessage('Some older encrypted profile data remains untouched but cannot be read on this device. New profiles can be saved separately.');
+      }
     } on Object catch (error) {
       _profileRestoreFailed = true;
       _profileStorageErrorCode = _safeStorageFailure(error);
@@ -328,8 +346,8 @@ class _VpnShellState extends State<VpnShell> {
       if (mounted) {
         _showMessage(
           '${context.tr('Saved profile data cannot be decrypted')} (${_profileStorageErrorCode ?? 'Unknown'}). '
-          '${context.tr('New servers are temporary until secure storage is repaired')} '
-          '${context.tr('Existing unreadable data has not been overwritten')}.',
+          '${context.tr('Existing unreadable data has not been overwritten')}. '
+          '${context.tr('New profiles will persist only after a secure save succeeds')}.'
         );
       }
       return false;
@@ -360,63 +378,21 @@ class _VpnShellState extends State<VpnShell> {
   }
 
   Future<void> _recoverUnreadableSecureStorage() async {
-    final confirmed = await showDialog<bool>(
+    await showDialog<void>(
       context: context,
       builder: (dialogContext) => AlertDialog(
-        title: const LocalizedText('Repair secure storage?'),
+        title: const LocalizedText('Secure storage status'),
         content: const LocalizedText(
-          'Android cannot decrypt some saved app data. You can keep it and cancel, or delete only the unreadable subscription/profile records. Deleted records cannot be recovered; you may need to add those subscriptions and profiles again. Other app data is not affected. Any servers added during this app session will be kept and saved after repair.',
+          'Unreadable encrypted records are never deleted by this app. New data is written to an isolated encrypted storage namespace and verified after each save. Older records that Android cannot decrypt remain untouched; if they are not restored, add them again. If a new save fails, the app will report it instead of claiming the data was saved.',
         ),
         actions: [
           TextButton(
-            onPressed: () => Navigator.of(dialogContext).pop(false),
-            child: const LocalizedText('Keep data'),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.of(dialogContext).pop(true),
-            child: const LocalizedText('Delete unreadable records'),
+            onPressed: () => Navigator.of(dialogContext).pop(),
+            child: const LocalizedText('Close'),
           ),
         ],
       ),
     );
-    if (confirmed != true || !mounted) return;
-    final repairSubscriptions = _subscriptionRestoreFailed;
-    final repairProfiles = _profileRestoreFailed;
-    try {
-      if (repairSubscriptions) {
-        await _subscriptionRepository.deleteSaved();
-      }
-      if (repairProfiles) {
-        await _profileRepository.deleteSaved();
-      }
-      if (!mounted) return;
-      setState(() {
-        _subscriptionRestoreFailed = false;
-        _profileRestoreFailed = false;
-        _profileStorageErrorCode = null;
-      });
-
-      // Preserve servers imported in this live session. The user explicitly
-      // confirmed removal of only the unreadable old records; discarding the
-      // newly imported, still-readable profiles here would be surprising.
-      var subscriptionsSaved = true;
-      if (repairSubscriptions) {
-        try {
-          await _subscriptionRepository.saveAll(_savedSubscriptions);
-          _sessionOnlySubscriptionIds.clear();
-        } on Object {
-          subscriptionsSaved = false;
-        }
-      }
-      var profilesSaved = true;
-      if (repairProfiles) profilesSaved = await _persistProfiles();
-      if (!mounted) return;
-      _showMessage(subscriptionsSaved && profilesSaved
-          ? 'Unreadable old records were removed. Current servers and subscriptions were saved; re-add any old unreadable items you still need.'
-          : 'Unreadable old records were removed, but some current items could not be saved. Keep the app open and try saving again.');
-    } on Object catch (error) {
-      _showMessage('Secure storage repair failed (${_safeStorageFailure(error)}). Try again; some unreadable records may already have been removed.');
-    }
   }
 
   Future<void> _restoreExcludedPackages() async {
@@ -650,7 +626,7 @@ class _VpnShellState extends State<VpnShell> {
     );
   }
 
-  Future<int?> _probeProfile(int index) async {
+  Future<int?> _probeProfile(int index, {bool batchScan = false}) async {
     if (index < 0 || index >= _profiles.length || _probingProfiles.contains(index)) {
       return null;
     }
@@ -660,7 +636,10 @@ class _VpnShellState extends State<VpnShell> {
       _profilePingFailures.remove(index);
       _failedPings.remove(index);
     });
-    final result = await _engine.measurePing(_profiles[index]);
+    final result = await _engine.measurePing(
+      _profiles[index],
+      batchScan: batchScan,
+    );
     if (!mounted) return null;
     setState(() {
       _probingProfiles.remove(index);
@@ -718,7 +697,7 @@ class _VpnShellState extends State<VpnShell> {
     try {
       for (final index in indices) {
         if (_cancelBatchPing || !mounted) break;
-        final result = await _probeProfile(index);
+        final result = await _probeProfile(index, batchScan: true);
         attempted++;
         if (result != null) responded++;
         if (mounted) setState(() => _batchPingCompleted = attempted);
@@ -836,7 +815,7 @@ class _VpnShellState extends State<VpnShell> {
         builder: (dialogContext) => AlertDialog(
           title: const LocalizedText('Secure storage is unreadable'),
           content: const LocalizedText(
-            'The app will not replace data it cannot read. You can repair storage in Servers, or use this subscription for this session only. It will not be saved and will disappear when the app closes.',
+            'The app will not replace data it cannot read. You can cancel, or use this subscription for this session only; it will not be saved and will disappear when the app closes.',
           ),
           actions: [
             TextButton(
@@ -1110,6 +1089,10 @@ class _VpnShellState extends State<VpnShell> {
         pingBatchTotal: _batchPingTotal,
         subscriptionBusy: _subscriptionBusy,
         secureStorageNeedsRepair: _subscriptionRestoreFailed || _profileRestoreFailed,
+        secureStorageNotice: _subscriptionRestoreFailed || _profileRestoreFailed ||
+            _legacySecureDataUnavailable || _secureNamespaceRotated,
+        legacyDataUnavailable: _legacySecureDataUnavailable,
+        storageNamespaceRotated: _secureNamespaceRotated,
         onRepairSecureStorage: _recoverUnreadableSecureStorage,
       ),
       _SettingsPage(
@@ -1558,6 +1541,9 @@ class _ProfilesPage extends StatelessWidget {
     required this.pingBatchTotal,
     required this.subscriptionBusy,
     required this.secureStorageNeedsRepair,
+    required this.secureStorageNotice,
+    required this.legacyDataUnavailable,
+    required this.storageNamespaceRotated,
     required this.onRepairSecureStorage,
   });
 
@@ -1586,6 +1572,9 @@ class _ProfilesPage extends StatelessWidget {
   final int pingBatchTotal;
   final bool subscriptionBusy;
   final bool secureStorageNeedsRepair;
+  final bool secureStorageNotice;
+  final bool legacyDataUnavailable;
+  final bool storageNamespaceRotated;
   final VoidCallback onRepairSecureStorage;
 
   Widget _profileCard(BuildContext context, int index, bool dark) {
@@ -1670,17 +1659,25 @@ class _ProfilesPage extends StatelessWidget {
         const Expanded(child: LocalizedText('My subscriptions', style: TextStyle(fontSize: 17, fontWeight: FontWeight.w800))),
         TextButton.icon(onPressed: connected || subscriptionBusy ? null : onAddSubscription, icon: const Icon(Icons.add_rounded), label: const LocalizedText('Add')),
       ]),
-      if (secureStorageNeedsRepair)
+      if (secureStorageNotice)
         Card(
           color: dark ? const Color(0xFF3A2C1D) : const Color(0xFFFFF1E5),
           child: ListTile(
             leading: const Icon(Icons.warning_amber_rounded, color: _coral),
-            title: const LocalizedText('Saved data cannot be decrypted'),
-            subtitle: const LocalizedText('New subscriptions can be used for one session, or repair storage after confirming removal of unreadable records.'),
+            title: LocalizedText(secureStorageNeedsRepair
+                ? 'Secure storage unavailable'
+                : 'Encrypted storage notice'),
+            subtitle: LocalizedText(secureStorageNeedsRepair
+                ? 'A secure save could not be verified. Do not close the app until the save succeeds; unreadable records were not deleted.'
+                : legacyDataUnavailable
+                    ? 'Older encrypted records remain untouched but could not be read. New saves use a separate encrypted store; re-add any missing items.'
+                    : storageNamespaceRotated
+                        ? 'Storage was moved to an isolated encrypted namespace. Existing data was left untouched and new saves are verified.'
+                        : 'Encrypted records were left untouched. New records are saved only after secure read-back verification.'),
             trailing: IconButton(
-              tooltip: context.tr('Repair secure storage'),
+              tooltip: context.tr('Secure storage information'),
               onPressed: subscriptionBusy ? null : onRepairSecureStorage,
-              icon: const Icon(Icons.build_circle_outlined),
+              icon: const Icon(Icons.info_outline_rounded),
             ),
           ),
         ),
@@ -1712,7 +1709,7 @@ class _ProfilesPage extends StatelessWidget {
                 leading: CircleAvatar(backgroundColor: dark ? const Color(0xFF213B34) : const Color(0xFFE5F6EF), child: Icon(Icons.rss_feed_rounded, color: dark ? const Color(0xFF7AD9B7) : const Color(0xFF317D68))),
                 title: Text(subscription.name, maxLines: 1, overflow: TextOverflow.ellipsis),
                 subtitle: Text(isPinging
-                    ? '${context.tr('Testing pings')}: ${pingBatchCompleted < pingBatchTotal ? pingBatchCompleted + 1 : pingBatchTotal}/$pingBatchTotal'
+                    ? '${context.tr('Testing latencies')}: ${pingBatchCompleted < pingBatchTotal ? pingBatchCompleted + 1 : pingBatchTotal}/$pingBatchTotal'
                     : context.tr('Private URL stored on this device')),
                 trailing: Wrap(spacing: 0, children: [
                   IconButton(
@@ -1736,7 +1733,22 @@ class _ProfilesPage extends StatelessWidget {
                 subtitle: Text(indices.isEmpty ? context.tr('Refresh this subscription to load its profiles') : '${indices.length} ${context.tr('profiles')}'),
                 children: indices.isEmpty
                     ? [const ListTile(title: LocalizedText('No profiles loaded yet.'))]
-                    : indices.map((index) => _profileCard(context, index, dark)).toList(),
+                    : indices.length > 40
+                        ? [
+                            SizedBox(
+                              height: 600,
+                              child: ListView.builder(
+                                primary: false,
+                                physics: const ClampingScrollPhysics(),
+                                itemCount: indices.length,
+                                itemBuilder: (context, row) =>
+                                    _profileCard(context, indices[row], dark),
+                              ),
+                            ),
+                          ]
+                        : indices
+                            .map((index) => _profileCard(context, index, dark))
+                            .toList(),
               ),
             ]),
           );

@@ -26,51 +26,221 @@ class SavedSubscription {
       );
 }
 
-/// Subscription URLs are credentials. Store them only through platform secure
-/// storage; never log or include them in UI errors, analytics, or repository files.
-class SubscriptionRepository {
-  SubscriptionRepository({FlutterSecureStorage? storage})
-      : _storage = storage ??
+/// Versioned encrypted storage that never resets or deletes an unreadable
+/// namespace. New data goes into isolated app-owned namespaces; legacy data is
+/// copied only when readable, verified in the new store, then cleaned up by key.
+class _VersionedSecureStorage {
+  _VersionedSecureStorage({FlutterSecureStorage? injected})
+      : _primary = injected ??
             FlutterSecureStorage(
-              // Preserve crash-safe cipher migration, but never silently reset
-              // encrypted records when Android Keystore cannot unwrap a key.
               aOptions: AndroidOptions(
-                migrateWithBackup: true,
+                storageNamespace: 'v2rayag_secure_store_v2',
+                migrateWithBackup: false,
                 resetOnError: false,
               ),
-            );
+            ),
+        _fallback = injected == null
+            ? FlutterSecureStorage(
+                aOptions: AndroidOptions(
+                  storageNamespace: 'v2rayag_secure_store_v3',
+                  migrateWithBackup: false,
+                  resetOnError: false,
+                ),
+              )
+            : null,
+        _legacy = injected == null
+            ? FlutterSecureStorage(
+                aOptions: AndroidOptions(
+                  migrateOnAlgorithmChange: false,
+                  migrateWithBackup: false,
+                  resetOnError: false,
+                ),
+              )
+            : null;
 
-  static const _key = 'saved_subscriptions_v1';
-  final FlutterSecureStorage _storage;
+  static const _envelopeMarker = 'v2rayag_secure_payload_v1';
+  final FlutterSecureStorage _primary;
+  final FlutterSecureStorage? _fallback;
+  final FlutterSecureStorage? _legacy;
+  final Map<String, int> _generations = {};
+  FlutterSecureStorage? _active;
+  bool legacyDataUnreadable = false;
+  bool namespaceRotated = false;
 
-  Future<List<SavedSubscription>> readAll() async {
-    final raw = await _storage.read(key: _key);
-    if (raw == null || raw.isEmpty) return const [];
+  String _migrationMarkerKey(String key) => 'v2rayag_migrated_legacy_$key';
+
+  Future<void> _cleanupLegacyAfterVerifiedMigration(String key) async {
+    final target = _active;
+    final legacy = _legacy;
+    if (target == null || legacy == null) return;
     try {
-      final data = jsonDecode(raw);
-      if (data is! List) return const [];
-      return data
-          .whereType<Map<String, dynamic>>()
-          .map(SavedSubscription.fromJson)
-          .toList(growable: true);
+      final markerRaw = await target.read(key: _migrationMarkerKey(key));
+      if (markerRaw == null || _decode(markerRaw).payload != 'true') return;
+      await legacy.delete(key: key);
+      // Verification is best-effort; if deletion did not take, keep the
+      // protected duplicate rather than risking any active data.
+      await legacy.read(key: key);
     } on Object {
-      // Corrupt or obsolete local data must not crash app startup.
-      return const [];
+      // Never clear a legacy key when its namespace is not readable.
     }
   }
 
-  Future<void> saveAll(List<SavedSubscription> subscriptions) => _storage.write(
-        key: _key,
-        value: jsonEncode(subscriptions.map((item) => item.toJson()).toList()),
-      );
+  ({String payload, int generation, int updatedAt}) _decode(String raw) {
+    try {
+      final value = jsonDecode(raw);
+      if (value is Map &&
+          value['_marker'] == _envelopeMarker &&
+          value['payload'] is String &&
+          value['generation'] is int) {
+        return (
+          payload: value['payload'] as String,
+          generation: value['generation'] as int,
+          updatedAt: value['updatedAt'] is int ? value['updatedAt'] as int : 0,
+        );
+      }
+    } on Object {
+      // Legacy repository values are raw JSON strings, not store envelopes.
+    }
+    return (payload: raw, generation: 0, updatedAt: 0);
+  }
 
-  /// Explicit recovery only: remove this app's unreadable subscription record
-  /// after the user confirms data loss. Never clear the whole secure store.
-  Future<void> deleteSaved() => _storage.delete(key: _key);
+  Future<String?> read(String key) async {
+    String? primaryRaw;
+    String? fallbackRaw;
+    Object? primaryError;
+    Object? fallbackError;
+    try {
+      primaryRaw = await _primary.read(key: key);
+    } on Object catch (error) {
+      primaryError = error;
+    }
+    final fallback = _fallback;
+    if (fallback != null) {
+      try {
+        fallbackRaw = await fallback.read(key: key);
+      } on Object catch (error) {
+        fallbackError = error;
+      }
+    }
+
+    final primaryRecord = primaryRaw == null ? null : _decode(primaryRaw);
+    final fallbackRecord = fallbackRaw == null ? null : _decode(fallbackRaw);
+    if (primaryRecord != null || fallbackRecord != null) {
+      final chooseFallback = fallbackRecord != null &&
+          (primaryRecord == null ||
+              fallbackRecord.updatedAt > primaryRecord.updatedAt ||
+              (fallbackRecord.updatedAt == primaryRecord.updatedAt &&
+                  fallbackRecord.generation > primaryRecord.generation));
+      final chosen = chooseFallback ? fallbackRecord : primaryRecord!;
+      _active = chooseFallback ? fallback : _primary;
+      namespaceRotated = namespaceRotated || chooseFallback;
+      _generations[key] = chosen.generation;
+      await _cleanupLegacyAfterVerifiedMigration(key);
+      return chosen.payload;
+    }
+
+    // If one isolated namespace is readable but empty, use it. If the primary
+    // is unreadable, start in the isolated fallback without touching its data.
+    if (primaryError == null) {
+      _active = _primary;
+    } else if (fallback != null && fallbackError == null) {
+      _active = fallback;
+      namespaceRotated = true;
+    } else {
+      Error.throwWithStackTrace(
+        primaryError ?? fallbackError ?? StateError('No secure store available.'),
+        StackTrace.current,
+      );
+    }
+
+    _generations.putIfAbsent(key, () => 0);
+    final legacy = _legacy;
+    if (legacy == null) return null;
+    String? oldValue;
+    try {
+      oldValue = await legacy.read(key: key);
+    } on Object {
+      // Preserve the old encrypted namespace and let the new isolated store
+      // accept future data. Never reset, clear, or overwrite the old record.
+      legacyDataUnreadable = true;
+      return null;
+    }
+    if (oldValue == null) return null;
+
+    // Copy and verify the full repository value before marking migration.
+    // A marker lets a later launch finish cleanup if the process dies between
+    // copying and deleting the old ciphertext. The copy remains available in
+    // the active encrypted namespace before any legacy delete is attempted.
+    await write(key, oldValue);
+    await write(_migrationMarkerKey(key), 'true');
+    await _cleanupLegacyAfterVerifiedMigration(key);
+    return oldValue;
+  }
+
+  Future<void> write(String key, String value) async {
+    if (!_generations.containsKey(key)) await read(key);
+    final target = _active;
+    if (target == null) {
+      throw StateError('No readable secure-storage namespace is available.');
+    }
+    final generation = (_generations[key] ?? 0) + 1;
+    final envelope = jsonEncode({
+      '_marker': _envelopeMarker,
+      'generation': generation,
+      'updatedAt': DateTime.now().microsecondsSinceEpoch,
+      'payload': value,
+    });
+    await target.write(key: key, value: envelope);
+    final persisted = await target.read(key: key);
+    if (persisted == null) {
+      throw StateError('Secure-storage read-back verification failed.');
+    }
+    final verified = _decode(persisted);
+    if (verified.generation != generation || verified.payload != value) {
+      throw StateError('Secure-storage read-back verification failed.');
+    }
+    _generations[key] = generation;
+  }
 }
 
-/// Profiles include credentials, so this repository uses the same encrypted
-/// platform storage as subscription URLs and never falls back to plain prefs.
+/// Subscription URLs are credentials. Store only in encrypted platform
+/// storage; never log or include them in UI errors, analytics, or repository files.
+class SubscriptionRepository {
+  SubscriptionRepository({FlutterSecureStorage? storage})
+      : _storage = _VersionedSecureStorage(injected: storage);
+
+  static const _key = 'saved_subscriptions_v1';
+  final _VersionedSecureStorage _storage;
+  bool get legacyDataUnreadable => _storage.legacyDataUnreadable;
+  bool get namespaceRotated => _storage.namespaceRotated;
+
+  Future<List<SavedSubscription>> readAll() async {
+    final raw = await _storage.read(_key);
+    if (raw == null || raw.isEmpty) return const [];
+    final data = jsonDecode(raw);
+    if (data is! List) {
+      throw const FormatException('Saved subscription data is invalid.');
+    }
+    final subscriptions = <SavedSubscription>[];
+    for (final item in data) {
+      if (item is! Map) {
+        throw const FormatException('A saved subscription record is invalid.');
+      }
+      subscriptions.add(SavedSubscription.fromJson(
+        Map<String, dynamic>.from(item),
+      ));
+    }
+    return subscriptions;
+  }
+
+  Future<void> saveAll(List<SavedSubscription> subscriptions) => _storage.write(
+        _key,
+        jsonEncode(subscriptions.map((item) => item.toJson()).toList()),
+      );
+}
+
+/// Profiles include credentials; use the same versioned encrypted storage and
+/// never fall back to plain preferences or silently discard corrupt records.
 class StoredProfileState {
   const StoredProfileState({
     required this.profiles,
@@ -91,19 +261,15 @@ class StoredProfileState {
 
 class ProfileRepository {
   ProfileRepository({FlutterSecureStorage? storage})
-      : _storage = storage ??
-            FlutterSecureStorage(
-              aOptions: AndroidOptions(
-                migrateWithBackup: true,
-                resetOnError: false,
-              ),
-            );
+      : _storage = _VersionedSecureStorage(injected: storage);
 
   static const _key = 'saved_profiles_v1';
-  final FlutterSecureStorage _storage;
+  final _VersionedSecureStorage _storage;
+  bool get legacyDataUnreadable => _storage.legacyDataUnreadable;
+  bool get namespaceRotated => _storage.namespaceRotated;
 
   Future<StoredProfileState> read() async {
-    final raw = await _storage.read(key: _key);
+    final raw = await _storage.read(_key);
     if (raw == null || raw.isEmpty) return StoredProfileState.empty;
     final decoded = jsonDecode(raw);
     if (decoded is! Map<String, dynamic> || decoded['profiles'] is! List) {
@@ -112,7 +278,7 @@ class ProfileRepository {
     final profiles = <VpnProfile>[];
     final sources = <String?>[];
     for (final item in decoded['profiles'] as List) {
-      if (item is! Map<String, dynamic> || item['profile'] is! Map) {
+      if (item is! Map || item['profile'] is! Map) {
         throw const FormatException('A saved profile record is invalid.');
       }
       final profile = VpnProfile.fromJson(
@@ -155,12 +321,8 @@ class ProfileRepository {
       ],
       'selectedIndex': selectedIndex,
     });
-    await _storage.write(key: _key, value: value);
+    await _storage.write(_key, value);
   }
-
-  /// Explicit recovery only: remove this app's unreadable profile record after
-  /// the user confirms that inaccessible saved profiles may be discarded.
-  Future<void> deleteSaved() => _storage.delete(key: _key);
 }
 
 class SubscriptionService {

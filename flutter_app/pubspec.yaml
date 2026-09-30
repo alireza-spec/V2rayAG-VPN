@@ -12,10 +12,9 @@ dependencies:
     sdk: flutter
   flutter_localizations:
     sdk: flutter
-  # Pin the VPN engine wrapper so a CI rebuild cannot silently change the
-  # parser/runtime integration between APKs.
+  # Pin native networking/storage integrations to avoid silent behavior drift.
   flutter_vless: 1.1.6
-  flutter_secure_storage: ^11.2.0
+  flutter_secure_storage: 11.2.0
   shared_preferences: ^2.5.3
   mobile_scanner: ^7.4.2
 
