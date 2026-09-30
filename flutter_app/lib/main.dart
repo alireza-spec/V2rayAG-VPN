@@ -26,6 +26,19 @@ const _canvas = Color(0xFFF6F7F3);
 
 enum _SubscriptionSaveChoice { saved, useOnce, cancelled }
 
+/// Keep the connection control available to stop an orphaned native VPN
+/// session even when secure storage could not restore its selected profile.
+bool canToggleVpnAction({
+  required bool hasProfile,
+  required bool activeOrPending,
+  required bool subscriptionBusy,
+  required bool engineBusy,
+  required bool canStart,
+}) =>
+    !engineBusy &&
+    (!subscriptionBusy || activeOrPending) &&
+    (activeOrPending || (hasProfile && canStart));
+
 extension _FirstOrNull<T> on Iterable<T> {
   T? get firstOrNull {
     final iterator = this.iterator;
@@ -1181,10 +1194,13 @@ class _HomePage extends StatelessWidget {
             connecting: engine.connecting,
             disconnecting: engine.disconnecting,
             failed: engine.message != null && !engine.connected && !engine.connecting,
-            enabled: profile != null &&
-                (!subscriptionBusy || activeOrPending) &&
-                !engine.busy &&
-                (engine.canStart || engine.connected || engine.connecting || engine.disconnecting),
+            enabled: canToggleVpnAction(
+              hasProfile: profile != null,
+              activeOrPending: activeOrPending,
+              subscriptionBusy: subscriptionBusy,
+              engineBusy: engine.busy,
+              canStart: engine.canStart,
+            ),
             onPressed: onToggleConnection,
           ),
         ),
@@ -1196,7 +1212,9 @@ class _HomePage extends StatelessWidget {
               const SizedBox(height: 5),
               LocalizedText(
                 profile == null
-                    ? 'Import a server before connecting'
+                    ? activeOrPending
+                        ? 'VPN service is active, but no saved server is available. Tap the shield to disconnect.'
+                        : 'Import a server before connecting'
                     : engine.connected
                         ? 'VPN service is connected. Test latency to verify network access.'
                         : engine.message ??
