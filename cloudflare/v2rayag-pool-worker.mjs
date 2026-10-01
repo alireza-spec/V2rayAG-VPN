@@ -8,7 +8,6 @@ const LEASE_PREFIX = "lease:";
 const RATE_PREFIX = "rate:";
 const DEVICE_PREFIX = "device:";
 const MAX_LEASES_PER_MINUTE = 12;
-const MAX_AUTO_ENROLLMENTS_PER_DAY_PER_IP = 20;
 const LEASE_TTL_SECONDS = 12 * 60 * 60;
 const SUPPORTED_URI = /^(?:vless|vmess|trojan|ss|shadowsocks|hysteria2|wireguard|socks|http):\/\//i;
 
@@ -56,20 +55,10 @@ async function authenticateDevice(request, env) {
   const record = await env.POOL.get(DEVICE_PREFIX + hash, "json");
   return record?.active === true ? { hash, record } : null;
 }
-async function allowAutoEnrollment(request, env) {
-  const ip = request.headers.get("cf-connecting-ip");
-  if (!ip) return false;
-  const day = Math.floor(Date.now() / 86400000);
-  const key = RATE_PREFIX + "enroll:" + await digest(`${ip}\n${day}`);
-  const count = Number(await env.POOL.get(key) || 0);
-  if (!Number.isFinite(count) || count >= MAX_AUTO_ENROLLMENTS_PER_DAY_PER_IP) return false;
-  await env.POOL.put(key, String(count + 1), { expirationTtl: 172800 });
-  return true;
-}
 async function enrollAppDevice(request, env) {
-  if (!(await allowAutoEnrollment(request, env))) {
-    return json({ success:false, error:"Too many new app setups from this network today. Try again tomorrow." }, 429);
-  }
+  // Do not impose an IP/day registration cap: mobile carriers and ISPs often
+  // share public IPs across many legitimate users. Per-device lease throttling
+  // remains in place to protect the pool endpoints from bursts.
   await parseBody(request); // Require a small JSON POST; do not accept enrollment via navigation or GET.
   const token = randomToken();
   const hash = await sha256Hex(token);
