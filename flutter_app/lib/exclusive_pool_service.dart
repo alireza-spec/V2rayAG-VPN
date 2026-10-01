@@ -140,7 +140,7 @@ class ExclusivePoolService {
   ExclusivePoolService({HttpClient? client, Uri? endpoint})
       : _client = client ?? HttpClient(),
         _ownsClient = client == null,
-        endpoint = endpoint ?? _defaultEndpoint;
+        endpoint = endpoint ?? Uri.parse(_defaultEndpoint);
 
   static const _defaultEndpoint =
       'https://v2rayag-app-pool-control.littlespring00.workers.dev';
@@ -273,7 +273,7 @@ class ExclusivePoolService {
     if (value is int && value >= 0) return value;
     if (value is num && value >= 0 && value.isFinite) return value.toInt();
     final parsed = int.tryParse('$value');
-    return parsed == null ? null : parsed.clamp(0, 0x7fffffffffffffff).toInt();
+    return parsed?.clamp(0, 0x7fffffffffffffff).toInt();
   }
 
   void dispose() {

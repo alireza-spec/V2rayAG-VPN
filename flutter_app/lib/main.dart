@@ -1376,7 +1376,7 @@ class _HomePage extends StatelessWidget {
     final candidate = poolSummary;
     final poolConnected = candidate != null && engine.connected;
     final poolRouteLabel = poolConnected
-        ? '${candidate!.subscriptionName} · ${candidate!.configurationName}'
+        ? '${candidate.subscriptionName} · ${candidate.configurationName}'
         : null;
     final expiry = candidate?.expiresAt;
     final expiryDate = expiry == null
