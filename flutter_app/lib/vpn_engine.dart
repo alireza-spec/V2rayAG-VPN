@@ -75,7 +75,6 @@ class VpnEngine extends ChangeNotifier {
     'https://cp.cloudflare.com/generate_204',
     'https://www.google.com/generate_204',
   ];
-  static const _batchProbeUrls = _telegramProbeUrls;
 
   VlessStatus _status = VlessStatus();
   bool _initialized = false;
