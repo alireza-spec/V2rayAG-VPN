@@ -5,13 +5,25 @@ import 'package:flutter_vless/flutter_vless.dart';
 
 import 'vpn_profile.dart';
 
-/// Configuration rejection and a fully cleaned-up unreachable node are safe
-/// reasons to try another profile in an automatic subscription connection.
-bool shouldRetrySubscriptionProfile(String? category) =>
-    category == 'InvalidConfiguration' ||
-    category == 'PlatformException:INVALID_CONFIG' ||
-    category == 'TunnelDisconnected' ||
-    category == 'ConnectTimeout';
+/// Once the native start has been cleaned up, a profile-level failure may be
+/// retried with another leased node. Never retry permission or cleanup errors,
+/// and do not rotate solely because an optional external health probe failed.
+bool shouldRetrySubscriptionProfile(String? category) {
+  if (category == null || category.isEmpty ||
+      category == 'RouteHealthCheckFailed') {
+    return false;
+  }
+  final normalized = category.toLowerCase();
+  if (normalized.contains('permission') ||
+      normalized.contains('cleanup') ||
+      normalized.contains('resetfailed') ||
+      normalized.contains('stoptimeout') ||
+      normalized.contains('missingplugin') ||
+      normalized.contains('initializationfailed')) {
+    return false;
+  }
+  return true;
+}
 
 /// Backwards-compatible policy name retained for existing tests/callers.
 bool shouldRetryConfigRejectedProfile(String? category) =>
@@ -26,21 +38,44 @@ int compareMeasuredLatency(int? leftMs, int? rightMs) {
   return leftMs.compareTo(rightMs);
 }
 
+/// Telegram-responsive candidates take priority; within each group, measured
+/// latency wins and inconclusive probes stay last.
+int compareAutomaticCandidate({
+  required bool leftTelegramResponsive,
+  required int? leftMs,
+  required bool rightTelegramResponsive,
+  required int? rightMs,
+}) {
+  if (leftTelegramResponsive != rightTelegramResponsive) {
+    return leftTelegramResponsive ? -1 : 1;
+  }
+  return compareMeasuredLatency(leftMs, rightMs);
+}
+
 /// Android VPN bridge. Other platforms deliberately remain disabled until their
 /// native projects and signing/entitlement setup are added and tested.
 class VpnEngine extends ChangeNotifier {
   late final FlutterVless _client = FlutterVless(onStatusChanged: _onStatus);
 
+  // The automatic selector checks a Telegram-owned HTTPS endpoint first so
+  // that networks with general web access but a blocked Telegram route do not
+  // keep preferring a server that cannot carry the user's target traffic.
+  static const _telegramProbeUrls = <String>[
+    'https://api.telegram.org/',
+    'https://telegram.org/',
+  ];
+  // General route checks are kept separate: a healthy Instagram/web route is
+  // useful as a clearly unverified fallback, but must not outrank a candidate
+  // that actually answers the Telegram probe.
+  static const _fallbackProbeUrls = <String>[
+    'https://www.instagram.com/',
+  ];
   static const _probeUrls = <String>[
+    'https://www.instagram.com/',
     'https://cp.cloudflare.com/generate_204',
     'https://www.google.com/generate_204',
   ];
-  // Batch scans use one provider-independent check per node to avoid doing
-  // two sequential fallback requests for hundreds of profiles. An unavailable
-  // result remains unverified; it is never treated as proof of a dead server.
-  static const _batchProbeUrls = <String>[
-    'https://cp.cloudflare.com/generate_204',
-  ];
+  static const _batchProbeUrls = _telegramProbeUrls;
 
   VlessStatus _status = VlessStatus();
   bool _initialized = false;
@@ -58,6 +93,7 @@ class VpnEngine extends ChangeNotifier {
   String? _failureCategory;
   String _phase = 'idle';
   int? _lastPingMs;
+  String? _lastPingTarget;
   Completer<bool>? _connectResult;
   Completer<void>? _disconnectResult;
   Stopwatch? _sessionClock;
@@ -77,6 +113,7 @@ class VpnEngine extends ChangeNotifier {
   String? get coreVersion => _coreVersion;
   String? get failureCategory => _failureCategory;
   int? get lastPingMs => _lastPingMs;
+  bool get lastPingWasTelegram => _lastPingTarget?.contains('telegram.org') ?? false;
   int get sessionUploadBytes => _sessionUpload;
   int get sessionDownloadBytes => _sessionDownload;
 
@@ -313,6 +350,7 @@ class VpnEngine extends ChangeNotifier {
     _failureCategory = null;
     _message = null;
     _lastPingMs = null;
+    _lastPingTarget = null;
     final result = Completer<bool>();
     _connectResult = result;
     _notify();
@@ -522,6 +560,8 @@ class VpnEngine extends ChangeNotifier {
     VpnProfile? profile, {
     bool batchScan = false,
     bool automaticSelection = false,
+    bool telegramOnly = false,
+    bool fallbackOnly = false,
   }) async {
     final connectedAtStart = connected;
     if (!_initialized || _busy || _pingBusy || connecting || disconnecting ||
@@ -537,12 +577,21 @@ class VpnEngine extends ChangeNotifier {
     _failureCategory = null;
     _message = null;
     _lastPingMs = null;
+    _lastPingTarget = null;
     _notify();
     try {
-      final urls = automaticSelection || batchScan
-          ? _batchProbeUrls
-          : _probeUrls;
-      final timeout = Duration(seconds: batchScan || automaticSelection ? 4 : 5);
+      final urls = telegramOnly || automaticSelection || batchScan
+          ? _telegramProbeUrls
+          : fallbackOnly
+              ? _fallbackProbeUrls
+              : _probeUrls;
+      final timeout = Duration(
+        seconds: fallbackOnly
+            ? 3
+            : batchScan || automaticSelection || telegramOnly
+                ? 2
+                : 5,
+      );
       for (final url in urls) {
         try {
           final result = connectedAtStart
@@ -555,6 +604,7 @@ class VpnEngine extends ChangeNotifier {
           if (generation != _pingGeneration) return null;
           if (result >= 0) {
             _lastPingMs = result;
+            _lastPingTarget = url;
             break;
           }
         } on Object catch (error) {

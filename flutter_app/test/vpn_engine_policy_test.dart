@@ -21,10 +21,16 @@ void main() {
       expect(shouldRetrySubscriptionProfile('RouteHealthCheckFailed'), isFalse);
     });
 
-    test('does not rotate for permission, unresolved cleanup, or generic platform failures', () {
+    test('retries other cleaned-up platform/profile start failures', () {
+      expect(shouldRetrySubscriptionProfile('PlatformException:OTHER'), isTrue);
+      expect(shouldRetrySubscriptionProfile('SocketException'), isTrue);
+    });
+
+    test('does not rotate for permission, unresolved cleanup, or ping-only failures', () {
       expect(shouldRetrySubscriptionProfile('VpnPermissionDenied'), isFalse);
       expect(shouldRetrySubscriptionProfile('TunnelResetFailed'), isFalse);
-      expect(shouldRetrySubscriptionProfile('PlatformException:OTHER'), isFalse);
+      expect(shouldRetrySubscriptionProfile('PlatformException:VPN_PERMISSION_DENIED'), isFalse);
+      expect(shouldRetrySubscriptionProfile('RouteHealthCheckFailed'), isFalse);
       expect(shouldRetrySubscriptionProfile(null), isFalse);
       expect(shouldRetryConfigRejectedProfile('Timeout'), isFalse);
     });
@@ -40,6 +46,27 @@ void main() {
     test('does not pretend an inconclusive probe is a zero-millisecond route', () {
       expect(compareMeasuredLatency(null, 1), greaterThan(0));
       expect(compareMeasuredLatency(0, null), lessThan(0));
+    });
+
+    test('prioritizes Telegram-responsive candidates before faster generic routes', () {
+      expect(
+        compareAutomaticCandidate(
+          leftTelegramResponsive: true,
+          leftMs: 180,
+          rightTelegramResponsive: false,
+          rightMs: 25,
+        ),
+        lessThan(0),
+      );
+      expect(
+        compareAutomaticCandidate(
+          leftTelegramResponsive: false,
+          leftMs: null,
+          rightTelegramResponsive: false,
+          rightMs: 90,
+        ),
+        greaterThan(0),
+      );
     });
   });
 }

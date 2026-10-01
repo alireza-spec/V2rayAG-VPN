@@ -29,10 +29,15 @@ const _canvas = Color(0xFFF6F7F3);
 enum _SubscriptionSaveChoice { saved, useOnce, cancelled }
 
 class _PoolCandidateProbe {
-  const _PoolCandidateProbe({required this.lease, required this.latencyMs});
+  const _PoolCandidateProbe({
+    required this.lease,
+    required this.latencyMs,
+    required this.telegramResponsive,
+  });
 
   final ExclusivePoolLease lease;
   final int? latencyMs;
+  final bool telegramResponsive;
 }
 
 /// Keep the connection control available to stop an orphaned native VPN
@@ -253,6 +258,7 @@ class _VpnShellState extends State<VpnShell> {
   PoolConnectionSummary? _activePoolSummary;
   VpnProfile? _activePoolProfile;
   bool _activePoolPingChecked = false;
+  bool? _activePoolTelegramVerified;
   String? _activePoolLeaseId;
   static const _activePoolSummaryKey = 'active_pool_summary_v1';
   final Map<int, int> _profilePings = {};
@@ -604,6 +610,7 @@ class _VpnShellState extends State<VpnShell> {
       _activePoolSummary = null;
       _activePoolProfile = null;
       _activePoolPingChecked = false;
+      _activePoolTelegramVerified = null;
       unawaited(_persistPoolSummary(null));
       unawaited(_releaseActivePoolLease());
     }
@@ -637,6 +644,7 @@ class _VpnShellState extends State<VpnShell> {
           _activePoolSummary = null;
           _activePoolProfile = null;
           _activePoolPingChecked = false;
+          _activePoolTelegramVerified = null;
         });
         unawaited(_persistPoolSummary(null));
       }
@@ -653,6 +661,7 @@ class _VpnShellState extends State<VpnShell> {
         _activePoolSummary = null;
         _activePoolProfile = null;
         _activePoolPingChecked = false;
+        _activePoolTelegramVerified = null;
       });
       unawaited(_persistPoolSummary(null));
       await _engine.connect(
@@ -688,6 +697,7 @@ class _VpnShellState extends State<VpnShell> {
       _activePoolSummary = null;
       _activePoolProfile = null;
       _activePoolPingChecked = false;
+      _activePoolTelegramVerified = null;
     });
     unawaited(_persistPoolSummary(null));
     _PoolCandidateProbe? bestNativeOnlyFallback;
@@ -702,9 +712,18 @@ class _VpnShellState extends State<VpnShell> {
           lease.candidate.profile,
           automaticSelection: true,
         );
-        probes.add(_PoolCandidateProbe(lease: lease, latencyMs: latency));
+        probes.add(_PoolCandidateProbe(
+          lease: lease,
+          latencyMs: latency,
+          telegramResponsive: latency != null && _engine.lastPingWasTelegram,
+        ));
       }
-      probes.sort((a, b) => compareMeasuredLatency(a.latencyMs, b.latencyMs));
+      probes.sort((a, b) => compareAutomaticCandidate(
+            leftTelegramResponsive: a.telegramResponsive,
+            leftMs: a.latencyMs,
+            rightTelegramResponsive: b.telegramResponsive,
+            rightMs: b.latencyMs,
+          ));
 
       for (final probe in probes) {
         if (_cancelPoolSearch) break;
@@ -726,13 +745,34 @@ class _VpnShellState extends State<VpnShell> {
           continue;
         }
 
-        // A native CONNECTED state alone can still leave apps without usable
-        // egress. Verify the actual active route and prefer a different sampled
-        // profile if the connected path returns no health-check result.
-        final activeLatency = await _engine.measurePing(candidate.profile);
+        // Prefer an active path that answers Telegram's own HTTPS endpoint;
+        // a low generic web delay alone does not show that Telegram is routed.
+        final activeLatency = await _engine.measurePing(
+          candidate.profile,
+          telegramOnly: true,
+        );
         if (_cancelPoolSearch) break;
         if (activeLatency == null) {
-          bestNativeOnlyFallback ??= probe;
+          // Keep a separately measured general route as a last-resort fallback
+          // if none of the sampled nodes can answer the Telegram probe.
+          final fallbackLatency = await _engine.measurePing(
+            candidate.profile,
+            fallbackOnly: true,
+          );
+          if (_cancelPoolSearch) break;
+          final fallbackProbe = _PoolCandidateProbe(
+            lease: probe.lease,
+            latencyMs: fallbackLatency ?? probe.latencyMs,
+            telegramResponsive: false,
+          );
+          if (bestNativeOnlyFallback == null ||
+              compareMeasuredLatency(
+                    fallbackProbe.latencyMs,
+                    bestNativeOnlyFallback.latencyMs,
+                  ) <
+                  0) {
+            bestNativeOnlyFallback = fallbackProbe;
+          }
           final stopped = await _engine.disconnect();
           if (!stopped) {
             // Preserve a tunnel Android has not confirmed it can stop; never
@@ -744,6 +784,7 @@ class _VpnShellState extends State<VpnShell> {
               setState(() {
                 _activePoolSummary = candidate.summary;
                 _activePoolPingChecked = true;
+                _activePoolTelegramVerified = false;
               });
               unawaited(_persistPoolSummary(candidate.summary));
             } else if (mounted && _engine.message != null) {
@@ -761,6 +802,7 @@ class _VpnShellState extends State<VpnShell> {
           setState(() {
             _activePoolSummary = candidate.summary;
             _activePoolPingChecked = true;
+            _activePoolTelegramVerified = true;
           });
           unawaited(_persistPoolSummary(candidate.summary));
         }
@@ -782,10 +824,14 @@ class _VpnShellState extends State<VpnShell> {
           retainedLeaseId = fallback.lease.leaseId;
           _activePoolLeaseId = fallback.lease.leaseId;
           _activePoolProfile = candidate.profile;
+          // Show the real fallback probe latency if available; otherwise the
+          // UI will honestly keep the ping state inconclusive.
+          await _engine.measurePing(candidate.profile, fallbackOnly: true);
           if (mounted) {
             setState(() {
               _activePoolSummary = candidate.summary;
               _activePoolPingChecked = true;
+              _activePoolTelegramVerified = false;
             });
             unawaited(_persistPoolSummary(candidate.summary));
           }
@@ -1336,6 +1382,7 @@ class _VpnShellState extends State<VpnShell> {
         profile: selected,
         poolSummary: _activePoolSummary,
         poolPingChecked: _activePoolPingChecked,
+        poolTelegramVerified: _activePoolTelegramVerified,
         poolSearching: _poolSearching,
         onUseAutomaticPool: _useAutomaticPool,
         engine: _engine,
@@ -1450,6 +1497,7 @@ class _HomePage extends StatelessWidget {
     required this.profile,
     required this.poolSummary,
     required this.poolPingChecked,
+    required this.poolTelegramVerified,
     required this.poolSearching,
     required this.onUseAutomaticPool,
     required this.engine,
@@ -1464,6 +1512,7 @@ class _HomePage extends StatelessWidget {
   final VpnProfile? profile;
   final PoolConnectionSummary? poolSummary;
   final bool poolPingChecked;
+  final bool? poolTelegramVerified;
   final bool poolSearching;
   final VoidCallback onUseAutomaticPool;
   final VpnEngine engine;
@@ -1541,7 +1590,9 @@ class _HomePage extends StatelessWidget {
                     ? 'Connecting to a suitable server…'
                     : profile == null
                         ? poolSummary != null && engine.connected
-                            ? 'VPN service is connected through the automatic pool.'
+                            ? poolTelegramVerified == false
+                                ? 'Telegram could not be verified; connected using the best available route.'
+                                : 'VPN service is connected through the automatic pool.'
                             : activeOrPending
                                 ? 'VPN service is active. Tap the shield to disconnect.'
                                 : engine.message ?? 'Tap to connect automatically'
@@ -1588,7 +1639,13 @@ class _HomePage extends StatelessWidget {
                 const Icon(Icons.route_rounded, size: 18, color: Color(0xFF31896F)),
                 const SizedBox(width: 8),
                 Expanded(child: LocalizedText(poolConnected ? 'SECURE ROUTE' : 'DESTINATION', style: const TextStyle(fontSize: 10, letterSpacing: 1.4, fontWeight: FontWeight.w800, color: _muted))),
-                Text(poolConnected ? context.tr('AUTOMATIC') : (profile?.protocol ?? context.tr('NO SERVER')), textDirection: TextDirection.ltr, style: const TextStyle(fontSize: 10, fontWeight: FontWeight.w800, color: _muted)),
+                Text(
+                  poolConnected || poolSearching
+                      ? context.tr('AUTOMATIC')
+                      : (profile?.protocol ?? context.tr(engine.connected ? 'ACTIVE SESSION' : 'NO SERVER')),
+                  textDirection: TextDirection.ltr,
+                  style: const TextStyle(fontSize: 10, fontWeight: FontWeight.w800, color: _muted),
+                ),
               ]),
               const SizedBox(height: 13),
               Directionality(
@@ -1598,18 +1655,26 @@ class _HomePage extends StatelessWidget {
                 child: Text(
                   poolConnected
                       ? poolRouteLabel!
-                      : showDestination
-                          ? (profile?.destination ?? context.tr('Add a server link'))
-                          : context.tr('Destination hidden'),
+                      : poolSearching
+                          ? context.tr('Connecting to a suitable server…')
+                          : engine.connected && profile == null
+                              ? context.tr('Active tunnel')
+                              : showDestination
+                                  ? (profile?.destination ?? context.tr('Add a server link'))
+                                  : context.tr('Destination hidden'),
                   style: TextStyle(fontSize: 18, fontWeight: FontWeight.w800, color: dark ? Colors.white : _ink),
                 ),
               ),
               const SizedBox(height: 5),
               LocalizedText(poolConnected
                       ? 'Subscription route. No device IP is displayed.'
-                      : profile == null
-                          ? 'No client address is read or displayed.'
-                          : 'Country: not looked up',
+                      : poolSearching
+                          ? 'Testing candidate servers on this network.'
+                          : profile == null
+                              ? engine.connected
+                                  ? 'Route details are not available for this active session.'
+                                  : 'No client address is read or displayed.'
+                              : 'Country: not looked up',
                   style: const TextStyle(fontSize: 12, color: _muted)),
               if (poolConnected) ...[
                 const SizedBox(height: 8),
@@ -1652,7 +1717,7 @@ class _HomePage extends StatelessWidget {
               const SizedBox(height: 10),
               Row(children: [
                 OutlinedButton.icon(
-                  onPressed: (profile == null && !poolConnected) || subscriptionBusy || engine.busy || engine.pingBusy || engine.connecting || engine.disconnecting
+                  onPressed: (profile == null && !poolConnected && !engine.connected) || subscriptionBusy || engine.busy || engine.pingBusy || engine.connecting || engine.disconnecting
                       ? null
                       : onMeasurePing,
                   icon: const Icon(Icons.speed_rounded, size: 17),
