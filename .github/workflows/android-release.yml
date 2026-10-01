@@ -142,6 +142,30 @@ jobs:
           manifest.write_text(updated)
           PY
 
+      - name: Apply V2rayAG launcher and notification icons
+        run: |
+          set -euo pipefail
+          cp -R android_brand/res/. android/app/src/main/res/
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          manifest = Path('android/app/src/main/AndroidManifest.xml')
+          xml = manifest.read_text()
+          for attribute, value in (
+              ('android:icon', '@mipmap/ic_launcher'),
+              ('android:roundIcon', '@mipmap/ic_launcher_round'),
+          ):
+              pattern = re.escape(attribute) + r'="[^"]*"'
+              if re.search(pattern, xml):
+                  xml = re.sub(pattern, f'{attribute}="{value}"', xml, count=1)
+              else:
+                  xml, count = re.subn(r'(<application\b)', rf'\1 {attribute}="{value}"', xml, count=1)
+                  if count != 1:
+                      raise SystemExit(f'Could not configure {attribute}')
+          manifest.write_text(xml)
+          PY
+
       - name: Set a Play-compatible Android package ID for tagged releases
         env:
           ANDROID_APPLICATION_ID: ${{ vars.ANDROID_APPLICATION_ID }}

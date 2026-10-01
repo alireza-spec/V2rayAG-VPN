@@ -1391,15 +1391,33 @@ class _VpnShellState extends State<VpnShell> {
     return Scaffold(
       appBar: AppBar(
         titleSpacing: 20,
-        title: const Row(
+        title: Row(
           children: [
-            _BrandMark(),
-            SizedBox(width: 11),
+            const _BrandMark(size: 40),
+            const SizedBox(width: 10),
             Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                LocalizedText('V2rayAG', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w800)),
-                LocalizedText('PRIVATE ROUTE', style: TextStyle(fontSize: 9, letterSpacing: 1.7, color: _muted)),
+                Semantics(
+                  label: 'V2rayAG',
+                  child: ExcludeSemantics(
+                    child: RichText(
+                      text: TextSpan(
+                        style: TextStyle(
+                          fontSize: 18,
+                          fontWeight: FontWeight.w800,
+                          letterSpacing: -0.35,
+                          color: Theme.of(context).colorScheme.onSurface,
+                        ),
+                        children: const [
+                          TextSpan(text: 'V2ray'),
+                          TextSpan(text: 'AG', style: TextStyle(color: Color(0xFF22D3D0))),
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
+                const LocalizedText('SECURE • RELIABLE', style: TextStyle(fontSize: 8, letterSpacing: 1.25, color: Color(0xFF7A8298))),
               ],
             ),
           ],
@@ -2531,15 +2549,20 @@ class _ImportSheetState extends State<_ImportSheet> {
 }
 
 class _BrandMark extends StatelessWidget {
-  const _BrandMark();
+  const _BrandMark({this.size = 35});
+
+  final double size;
+
   @override
-  Widget build(BuildContext context) => Container(
-        width: 35,
-        height: 35,
-        decoration: BoxDecoration(
-          borderRadius: BorderRadius.circular(12),
-          gradient: const LinearGradient(colors: [_mint, Color(0xFF81E0B1), _coral], begin: Alignment.topLeft, end: Alignment.bottomRight),
+  Widget build(BuildContext context) => Semantics(
+        image: true,
+        label: 'V2rayAG logo',
+        child: Image.asset(
+          'assets/brand/v2rayag_mark.png',
+          width: size,
+          height: size,
+          fit: BoxFit.contain,
+          filterQuality: FilterQuality.high,
         ),
-        child: const Icon(Icons.shield_moon_rounded, size: 21, color: Colors.white),
       );
 }

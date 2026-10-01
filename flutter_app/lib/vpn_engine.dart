@@ -266,8 +266,8 @@ class VpnEngine extends ChangeNotifier {
     _notify();
     try {
       await _client.initializeVless(
-        notificationIconResourceType: 'mipmap',
-        notificationIconResourceName: 'ic_launcher',
+        notificationIconResourceType: 'drawable',
+        notificationIconResourceName: 'ic_v2rayag_notification',
       );
       _initialized = true;
       _phase = 'ready';
