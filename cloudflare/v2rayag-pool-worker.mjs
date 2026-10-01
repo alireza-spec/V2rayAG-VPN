@@ -8,6 +8,7 @@ const LEASE_PREFIX = "lease:";
 const RATE_PREFIX = "rate:";
 const DEVICE_PREFIX = "device:";
 const MAX_LEASES_PER_MINUTE = 12;
+const MAX_AUTO_ENROLLMENTS_PER_DAY_PER_IP = 20;
 const LEASE_TTL_SECONDS = 12 * 60 * 60;
 const SUPPORTED_URI = /^(?:vless|vmess|trojan|ss|shadowsocks|hysteria2|wireguard|socks|http):\/\//i;
 
@@ -20,7 +21,7 @@ const ADMIN_HTML = `<!doctype html>
 <main id="panel" class="hidden">
 <section class="card"><h2>Add subscriptions</h2><p class="muted">Paste one HTTPS subscription URL per line. Optionally use <code>Name | URL</code>. Keep this page private; never put the links in chat or source code. Maximum 100 entries per import.</p><label for="entries">URLs</label><textarea id="entries" spellcheck="false" placeholder="Europe 1 | https://provider.example/sub/...&#10;https://provider.example/sub/..."></textarea><div class="row"><button id="importBtn">Add subscriptions</button><button id="refreshBtn" class="secondary">Refresh subscription status</button></div><div id="actionMsg" class="status"></div></section>
 <section class="card"><div class="row"><h2 style="margin:0">Pool subscriptions</h2><button id="reloadBtn" class="secondary">Reload list</button><button id="deleteAllBtn" class="secondary danger">Delete all</button></div><p class="muted">A subscription is eligible only when its latest refresh includes usable configuration links and has not reported exhausted quota or expiry. Ping is measured by the app on the user's device, not by this panel.</p><div class="row"><input id="search" type="search" placeholder="Search by subscription name"><select id="statusFilter"><option value="">All statuses</option><option value="active">Active</option><option value="pending">Pending</option><option value="fetch_error">Fetch error</option><option value="expired">Expired</option><option value="exhausted">Quota exhausted</option><option value="unknown_quota">Unknown quota</option><option value="no_configs">No configs</option></select><span id="count" class="muted"></span></div><div class="table-wrap"><table><thead><tr><th>Name</th><th>Status</th><th>Configs</th><th>Quota</th><th>Expiry</th><th>Checked</th><th>Actions</th></tr></thead><tbody id="rows"><tr><td colspan="7" class="muted">Unlock to load.</td></tr></tbody></table></div></section>
-<section class="card"><h2>App device access</h2><p class="muted">Create a separate revocable access key for each approved app installation. A new key is shown only once; copy it directly into that app’s Settings. Never put the key in source code or chat.</p><label for="deviceName">Device label</label><input id="deviceName" maxlength="80" placeholder="e.g. Little Spring phone"><div class="row"><button id="createDeviceBtn">Issue device key</button><span id="deviceMsg" class="status"></span></div><div id="deviceTokenBox" class="hidden"><label for="deviceToken">Copy this key now; it will not be shown again</label><input id="deviceToken" readonly autocomplete="off"><button id="copyDeviceToken" class="secondary">Copy key</button></div><div class="table-wrap"><table><thead><tr><th>Device</th><th>Created</th><th>Last used</th><th>State</th><th>Action</th></tr></thead><tbody id="deviceRows"><tr><td colspan="5" class="muted">Unlock to load.</td></tr></tbody></table></div></section></main>
+<section class="card"><h2>App device access</h2><p class="muted">The app can securely enroll itself the first time the user taps Connect; users do not need a key. Review and revoke app installations here when needed. Manual device keys remain available for controlled testing.</p><label for="deviceName">Device label</label><input id="deviceName" maxlength="80" placeholder="e.g. Little Spring phone"><div class="row"><button id="createDeviceBtn">Issue device key</button><span id="deviceMsg" class="status"></span></div><div id="deviceTokenBox" class="hidden"><label for="deviceToken">Copy this key now; it will not be shown again</label><input id="deviceToken" readonly autocomplete="off"><button id="copyDeviceToken" class="secondary">Copy key</button></div><div class="table-wrap"><table><thead><tr><th>Device</th><th>Created</th><th>Last used</th><th>State</th><th>Action</th></tr></thead><tbody id="deviceRows"><tr><td colspan="5" class="muted">Unlock to load.</td></tr></tbody></table></div></section></main>
 <script>
 const $=s=>document.querySelector(s);let adminKey=sessionStorage.getItem('v2rayag_pool_admin')||'';const headers=()=>({'Authorization':'Bearer '+adminKey,'Content-Type':'application/json'});function status(el,msg){el.textContent=msg;}
 async function api(path,body){const r=await fetch('/admin/api/'+path,{method:body?'POST':'GET',headers:headers(),body:body?JSON.stringify(body):undefined});let d={};try{d=await r.json()}catch{}if(!r.ok||d.success===false)throw new Error(d.error||('Request failed ('+r.status+')'));return d;}
@@ -54,6 +55,29 @@ async function authenticateDevice(request, env) {
   const hash = await sha256Hex(token.toLowerCase());
   const record = await env.POOL.get(DEVICE_PREFIX + hash, "json");
   return record?.active === true ? { hash, record } : null;
+}
+async function allowAutoEnrollment(request, env) {
+  const ip = request.headers.get("cf-connecting-ip");
+  if (!ip) return false;
+  const day = Math.floor(Date.now() / 86400000);
+  const key = RATE_PREFIX + "enroll:" + await digest(`${ip}\n${day}`);
+  const count = Number(await env.POOL.get(key) || 0);
+  if (!Number.isFinite(count) || count >= MAX_AUTO_ENROLLMENTS_PER_DAY_PER_IP) return false;
+  await env.POOL.put(key, String(count + 1), { expirationTtl: 172800 });
+  return true;
+}
+async function enrollAppDevice(request, env) {
+  if (!(await allowAutoEnrollment(request, env))) {
+    return json({ success:false, error:"Too many new app setups from this network today. Try again tomorrow." }, 429);
+  }
+  await parseBody(request); // Require a small JSON POST; do not accept enrollment via navigation or GET.
+  const token = randomToken();
+  const hash = await sha256Hex(token);
+  await env.POOL.put(DEVICE_PREFIX + hash, JSON.stringify({
+    name:"V2rayAG app (automatic)", active:true, autoProvisioned:true,
+    createdAt:Date.now(), lastUsedAt:null,
+  }));
+  return json({ success:true, token });
 }
 async function allowLeaseRequest(request, env, deviceHash) {
   const ip = request.headers.get("cf-connecting-ip") || "unknown";
@@ -220,7 +244,7 @@ async function adminApi(request, env, path) {
     if (!name) return json({ success:false, error:"A device label is required" }, 400);
     const page = await env.POOL.list({ prefix:DEVICE_PREFIX, limit:1000 });
     const records = await Promise.all(page.keys.map(key => env.POOL.get(key.name, "json")));
-    if (records.filter(record => record?.active === true).length >= 100) return json({ success:false, error:"Maximum 100 active device keys" }, 400);
+    if (records.filter(record => record?.active === true && record?.autoProvisioned !== true).length >= 100) return json({ success:false, error:"Maximum 100 active manually issued device keys" }, 400);
     const token = randomToken();
     const id = await sha256Hex(token);
     await env.POOL.put(DEVICE_PREFIX + id, JSON.stringify({ name, active:true, createdAt:Date.now(), lastUsedAt:null }));
@@ -287,7 +311,7 @@ async function adminApi(request, env, path) {
 }
 async function acquirePoolLease(request, env) {
   const device = await authenticateDevice(request, env);
-  if (!device) return json({ success:false, error:"This app installation is not authorized. Set up device access in the app settings." }, 401);
+  if (!device) return json({ success:false, error:"This app installation is not authorized. Contact support if the problem persists." }, 401);
   if (!(await allowLeaseRequest(request, env, device.hash))) {
     return json({ success:false, error:"Connection attempts are temporarily limited. Please wait a minute and try again." }, 429);
   }
@@ -345,12 +369,13 @@ export default {
   async fetch(request, env) {
     const url = new URL(request.url); const path = url.pathname.replace(/\/$/, "") || "/";
     if (request.method === "OPTIONS") return new Response(null,{status:204,headers:{"access-control-allow-origin":"*","access-control-allow-methods":"GET,POST,OPTIONS","access-control-allow-headers":"authorization,content-type","access-control-max-age":"600"}});
-    if (path === "/healthz" && request.method === "GET") return json({ ok:true, service:"V2rayAG private pool", version:3 });
+    if (path === "/healthz" && request.method === "GET") return json({ ok:true, service:"V2rayAG private pool", version:4 });
     if (path === "/admin" && request.method === "GET") return new Response(ADMIN_HTML,{headers:{"content-type":"text/html; charset=utf-8","cache-control":"no-store","x-content-type-options":"nosniff","content-security-policy":"default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'"}});
     if (path.startsWith("/admin/api/")) {
       if (request.method !== "GET" && request.method !== "POST") return json({success:false,error:"Method not allowed"},405);
       return adminApi(request,env,path);
     }
+    if (path === "/v1/app/devices/enroll" && request.method === "POST") return enrollAppDevice(request,env);
     if (path === "/v1/pool/candidates") return json({success:false,error:"This endpoint has been retired."},410);
     if (path === "/v1/pool/leases" && request.method === "POST") return acquirePoolLease(request,env);
     if (path === "/v1/pool/leases/release" && request.method === "POST") return releasePoolLease(request,env);

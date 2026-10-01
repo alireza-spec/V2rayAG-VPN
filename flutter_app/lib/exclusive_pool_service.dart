@@ -138,6 +138,11 @@ class ExclusivePoolLease {
   final ExclusivePoolCandidate candidate;
 }
 
+class _PoolAuthorizationException implements Exception {
+  const _PoolAuthorizationException(this.message);
+  final String message;
+}
+
 class ExclusivePoolService {
   ExclusivePoolService({
     HttpClient? client,
@@ -148,7 +153,7 @@ class ExclusivePoolService {
         _storage = storage ??
             FlutterSecureStorage(
               aOptions: AndroidOptions(
-                storageNamespace: 'v2rayag_pool_device_v1',
+                storageNamespace: 'v2rayag_auto_access_v1',
                 migrateWithBackup: false,
                 resetOnError: false,
               ),
@@ -159,7 +164,8 @@ class ExclusivePoolService {
       'https://v2rayag-app-pool-control.littlespring00.workers.dev';
   static const maxResponseBytes = 128 * 1024;
   static const maxProfileBytes = 16 * 1024;
-  static const _deviceTokenKey = 'v2rayag_pool_device_access_v1';
+  static const _deviceTokenKey = 'v2rayag_auto_access_token_v1';
+  static const _deviceTokenOriginKey = 'v2rayag_auto_access_origin_v1';
   static const _supportedSchemes = {
     'vless', 'vmess', 'ss', 'shadowsocks', 'trojan', 'socks',
     'hysteria2', 'wireguard', 'http',
@@ -170,6 +176,8 @@ class ExclusivePoolService {
   final FlutterSecureStorage _storage;
   final Uri endpoint;
 
+  Future<String>? _enrollmentInFlight;
+
   Future<bool> hasDeviceAccessToken() async => (await _readDeviceToken()) != null;
 
   Future<void> saveDeviceAccessToken(String rawToken) async {
@@ -177,41 +185,122 @@ class ExclusivePoolService {
     if (!RegExp(r'^[0-9a-f]{64}$').hasMatch(token)) {
       throw const FormatException('Device key must be 64 hexadecimal characters.');
     }
+    await _storeDeviceToken(token, automatic: false);
+  }
+
+  Future<void> _storeDeviceToken(String token, {required bool automatic}) async {
     await _storage.write(key: _deviceTokenKey, value: token);
     final savedToken = (await _storage.read(key: _deviceTokenKey))?.trim().toLowerCase();
     if (savedToken != token) {
-      throw StateError('Device access key secure-storage read-back verification failed.');
+      throw StateError('Device access secure-storage read-back verification failed.');
     }
+    await _storage.write(
+      key: _deviceTokenOriginKey,
+      value: automatic ? 'automatic' : 'manual',
+    );
   }
 
   Future<void> clearDeviceAccessToken() async {
     await _storage.delete(key: _deviceTokenKey);
+    await _storage.delete(key: _deviceTokenOriginKey);
   }
 
   Future<String?> _readDeviceToken() async {
+    // Do not turn a Keystore/decryption failure into "missing"; that could
+    // overwrite a still-present, unreadable credential with a new one.
     try {
       final token = (await _storage.read(key: _deviceTokenKey))?.trim().toLowerCase();
-      if (token == null || !RegExp(r'^[0-9a-f]{64}$').hasMatch(token)) return null;
+      if (token == null) return null;
+      if (!RegExp(r'^[0-9a-f]{64}$').hasMatch(token)) {
+        throw const FormatException(
+          'Saved app access data is invalid; it was not replaced. Check secure storage and try again.',
+        );
+      }
       return token;
+    } on FormatException {
+      rethrow;
     } on Object {
-      return null;
+      throw const FormatException(
+        'Could not read secure app access data; it was left untouched. Check secure storage and try again.',
+      );
     }
   }
 
-  Future<ExclusivePoolLease> acquireLease({Set<String> excludeIds = const {}}) async {
-    final excluded = excludeIds
-        .where((id) => RegExp(r'^[0-9a-f]{24}$').hasMatch(id))
-        .take(100)
-        .toList(growable: false);
-    final deviceToken = await _readDeviceToken();
-    if (deviceToken == null) {
-      throw const FormatException('Set up automatic pool access in Settings before connecting.');
+  Future<bool> _hasAutomaticToken() async =>
+      (await _storage.read(key: _deviceTokenOriginKey)) == 'automatic';
+
+  Future<String> _ensureDeviceToken() async {
+    final existing = await _readDeviceToken();
+    if (existing != null) return existing;
+    final pending = _enrollmentInFlight;
+    if (pending != null) return pending;
+    final enrollment = _enrollDevice();
+    _enrollmentInFlight = enrollment;
+    try {
+      return await enrollment;
+    } finally {
+      if (identical(_enrollmentInFlight, enrollment)) _enrollmentInFlight = null;
     }
+  }
+
+  Future<String> _enrollDevice() async {
+    final uri = endpoint.replace(path: '/v1/app/devices/enroll', query: null);
+    if (uri.scheme != 'https' || uri.host.isEmpty || uri.userInfo.isNotEmpty) {
+      throw const FormatException('The secure server pool is not configured.');
+    }
+    try {
+      final request = await _client.postUrl(uri).timeout(const Duration(seconds: 12));
+      request.followRedirects = false;
+      request.headers.set(HttpHeaders.acceptHeader, 'application/json');
+      request.headers.set(HttpHeaders.contentTypeHeader, 'application/json; charset=utf-8');
+      request.headers.set(HttpHeaders.userAgentHeader, 'V2rayAG');
+      request.write(jsonEncode({'platform': Platform.isAndroid ? 'android' : 'mobile'}));
+      final response = await request.close().timeout(const Duration(seconds: 15));
+      final bytes = await _readResponse(response);
+      final decoded = _decodeJson(bytes);
+      if (response.statusCode != HttpStatus.ok) {
+        final message = decoded is Map<String, dynamic> && decoded['error'] is String
+            ? decoded['error'] as String
+            : 'Automatic access could not be initialized. Try again shortly.';
+        throw FormatException(message);
+      }
+      final token = parseEnrollmentToken(decoded);
+      try {
+        await _storeDeviceToken(token, automatic: true);
+      } on Object {
+        throw const FormatException(
+          'Automatic access could not be saved securely on this phone. Check secure storage and try again.',
+        );
+      }
+      return token;
+    } on FormatException {
+      rethrow;
+    } on Object {
+      throw const FormatException(
+        'Could not initialize automatic access. Check your internet and try again.',
+      );
+    }
+  }
+
+  static String parseEnrollmentToken(Object? value) {
+    if (value is! Map<String, dynamic> || value['success'] != true) {
+      throw const FormatException('Automatic access could not be initialized. Try again shortly.');
+    }
+    final token = value['token'];
+    if (token is! String || !RegExp(r'^[0-9a-f]{64}$').hasMatch(token)) {
+      throw const FormatException('The server returned an invalid access token.');
+    }
+    return token;
+  }
+
+  Future<ExclusivePoolLease> _requestLease(
+    List<String> excluded,
+    String deviceToken,
+  ) async {
     final uri = endpoint.replace(path: '/v1/pool/leases', query: null);
     if (uri.scheme != 'https' || uri.host.isEmpty || uri.userInfo.isNotEmpty) {
       throw const FormatException('The secure server pool is not configured.');
     }
-
     try {
       final request = await _client.postUrl(uri).timeout(const Duration(seconds: 12));
       request.followRedirects = false;
@@ -222,14 +311,19 @@ class ExclusivePoolService {
       request.write(jsonEncode({'exclude': excluded}));
       final response = await request.close().timeout(const Duration(seconds: 15));
       final bytes = await _readResponse(response);
+      final decoded = _decodeJson(bytes);
       if (response.statusCode != HttpStatus.ok) {
-        final decoded = _decodeJson(bytes);
         final message = decoded is Map<String, dynamic> && decoded['error'] is String
             ? decoded['error'] as String
             : 'No usable server is available right now. Try again shortly.';
+        if (response.statusCode == HttpStatus.unauthorized) {
+          throw _PoolAuthorizationException(message);
+        }
         throw FormatException(message);
       }
-      return parseLease(_decodeJson(bytes));
+      return parseLease(decoded);
+    } on _PoolAuthorizationException {
+      rethrow;
     } on FormatException {
       rethrow;
     } on Object {
@@ -239,11 +333,31 @@ class ExclusivePoolService {
     }
   }
 
+  Future<ExclusivePoolLease> acquireLease({Set<String> excludeIds = const {}}) async {
+    final excluded = excludeIds
+        .where((id) => RegExp(r'^[0-9a-f]{24}$').hasMatch(id))
+        .take(100)
+        .toList(growable: false);
+    final deviceToken = await _ensureDeviceToken();
+    try {
+      return await _requestLease(excluded, deviceToken);
+    } on _PoolAuthorizationException catch (error) {
+      // Migrate a previously pasted key to automatic access if it is no longer
+      // valid. Never silently replace an already automatic/revoked token.
+      if (await _hasAutomaticToken()) {
+        throw FormatException(error.message);
+      }
+      await clearDeviceAccessToken();
+      final replacement = await _enrollDevice();
+      return _requestLease(excluded, replacement);
+    }
+  }
+
   Future<void> releaseLease(String leaseId) async {
     if (!RegExp(r'^[0-9a-f]{64}$').hasMatch(leaseId)) return;
-    final deviceToken = await _readDeviceToken();
-    if (deviceToken == null) return;
     try {
+      final deviceToken = await _readDeviceToken();
+      if (deviceToken == null) return;
       final uri = endpoint.replace(path: '/v1/pool/leases/release', query: null);
       if (uri.scheme != 'https' || uri.host.isEmpty || uri.userInfo.isNotEmpty) return;
       final request = await _client.postUrl(uri).timeout(const Duration(seconds: 5));

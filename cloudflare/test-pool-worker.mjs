@@ -13,7 +13,7 @@ class MockKV {
 }
 const env = { POOL: new MockKV(), ADMIN_KEY: 'test-admin-key' };
 const call = (path, method = 'GET', body, headers = {}) => worker.fetch(new Request('https://pool.test' + path, { method, headers, body: body == null ? undefined : JSON.stringify(body) }), env);
-let r = await call('/healthz'); assert.equal(r.status, 200); assert.equal((await r.json()).version, 3);
+let r = await call('/healthz'); assert.equal(r.status, 200); assert.equal((await r.json()).version, 4);
 r = await call('/admin/api/subscriptions'); assert.equal(r.status, 401);
 r = await call('/admin/api/subscriptions', 'GET', null, { authorization: 'Bearer test-admin-key' }); assert.equal(r.status, 200); assert.deepEqual((await r.json()).subscriptions, []);
 r = await call('/admin/api/import', 'POST', { lines: ['http://not-secure.example/sub/a'] }, { authorization: 'Bearer test-admin-key', 'content-type': 'application/json' }); assert.equal(r.status, 200); assert.equal((await r.json()).errors.length, 1);
@@ -36,10 +36,20 @@ r = await call('/admin/api/devices/create','POST',{name:'Test phone'},adminHeade
 assert.equal(await env.POOL.get('device:'+device.token),null);
 r = await call('/admin/api/devices','GET',null,adminHeaders); assert.equal(r.status,200); d=await r.json(); assert.equal(d.devices.length,1); assert.equal('token' in d.devices[0],false); assert.equal(d.devices[0].name,'Test phone');
 r = await call('/v1/pool/leases','POST',{exclude:[]},{'content-type':'application/json','cf-connecting-ip':'192.0.2.9'}); assert.equal(r.status,401); // Public, anonymous requests never reveal profiles.
+r = await call('/v1/app/devices/enroll','POST',{platform:'android'},{'content-type':'application/json','cf-connecting-ip':'192.0.2.8'}); assert.equal(r.status,200); const automatic=await r.json(); assert.match(automatic.token,/^[0-9a-f]{64}$/); assert.equal('device' in automatic,false);
+const automaticHash = [...new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(automatic.token)))].map(x=>x.toString(16).padStart(2,'0')).join('');
+assert.equal((await env.POOL.get('device:'+automaticHash,'json')).autoProvisioned,true);
+r = await call('/v1/app/devices/enroll','POST',{}, {'content-type':'application/json'}); assert.equal(r.status,429); // Cloudflare source IP is required for enrolment throttling.
+for (let i=0;i<20;i++) { r=await call('/v1/app/devices/enroll','POST',{}, {'content-type':'application/json','cf-connecting-ip':'192.0.2.99'}); assert.equal(r.status,200); }
+r=await call('/v1/app/devices/enroll','POST',{}, {'content-type':'application/json','cf-connecting-ip':'192.0.2.99'}); assert.equal(r.status,429);
 const deviceHeaders = { authorization:'Bearer '+device.token, 'content-type':'application/json' };
 const realFetch = globalThis.fetch;
 globalThis.fetch = async () => new Response('vless://user@example.com:443?security=tls#Node-A', { status:200, headers:{ 'subscription-userinfo':'upload=100; download=200; total=1000; expire=2000000000' } });
 try {
+  const automaticHeaders = { authorization:'Bearer '+automatic.token, 'content-type':'application/json' };
+  r = await call('/v1/pool/leases', 'POST', { exclude:[] }, { ...automaticHeaders, 'cf-connecting-ip':'192.0.2.7' });
+  assert.equal(r.status,200); const automaticLease=await r.json(); assert.equal(automaticLease.candidate.subscriptionName,poolSub.name);
+  r = await call('/v1/pool/leases/release','POST',{leaseId:automaticLease.leaseId},automaticHeaders); assert.equal(r.status,200);
   r = await call('/v1/pool/leases', 'POST', { exclude:[] }, { ...deviceHeaders, 'cf-connecting-ip':'192.0.2.10' });
   assert.equal(r.status, 200); d=await r.json();
   assert.match(d.leaseId,/^[0-9a-f]{64}$/); assert.equal(d.candidate.id.length,24);
@@ -61,4 +71,4 @@ try {
 } finally { globalThis.fetch = realFetch; }
 r = await call('/admin'); assert.equal(r.status, 200); const html=await r.text(); assert.match(html,/V2rayAG private pool/); const inline=html.match(/<script>([\s\S]*?)<\/script>/)?.[1]; assert.ok(inline); new Function(inline); assert.match(inline,/delete-all/); assert.match(inline,/statusFilter/); assert.match(inline,/markers=text.match/); assert.match(inline,/devices\/create/);
 const pasted='Sub 0001 | https://one.example/aSub 0002 | https://two.example/b'; const markers=pasted.match(/Sub\s+\d+\s*\|\s*https/gi)||[]; const parsed=(markers.length>1?pasted.split(/(?=Sub\s+\d+\s*\|\s*https)/i):pasted.split(/\r\n|[\n\r\u2028\u2029]/)).map(x=>x.trim()).filter(Boolean); assert.equal(parsed.length,2); assert.match(parsed[1],/^Sub 0002/);
-console.log('Worker admin, device enrollment/revocation, authenticated one-profile leases, release, rate-limit, flattened import, and deletion tests passed.');
+console.log('Worker admin, automatic no-key enrollment, device enrollment/revocation, one-profile leases, release, rate-limit, flattened import, and deletion tests passed.');

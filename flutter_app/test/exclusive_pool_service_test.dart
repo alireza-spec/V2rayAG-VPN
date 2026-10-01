@@ -73,6 +73,27 @@ void main() {
       service.dispose();
     });
 
+    test('accepts only a valid automatically issued device token', () {
+      expect(
+        ExclusivePoolService.parseEnrollmentToken({
+          'success': true,
+          'token': 'b' * 64,
+        }),
+        'b' * 64,
+      );
+      expect(
+        () => ExclusivePoolService.parseEnrollmentToken({'success': false}),
+        throwsFormatException,
+      );
+      expect(
+        () => ExclusivePoolService.parseEnrollmentToken({
+          'success': true,
+          'token': 'short',
+        }),
+        throwsFormatException,
+      );
+    });
+
     test('rejects malformed leases and profiles', () {
       expect(
         () => ExclusivePoolService.parseLease({'success': false}),

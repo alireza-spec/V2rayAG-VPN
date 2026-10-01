@@ -222,6 +222,7 @@ class V2rayLocalizations {
     'Bypass apps': 'مستثناکردن برنامه‌ها',
     'No apps excluded': 'هیچ برنامه‌ای مستثنا نشده است',
     'Automatic pool access': 'دسترسی به مخزن خودکار',
+    'Connect automatically; no key setup is needed': 'اتصال خودکار؛ نیازی به تنظیم یا واردکردن کلید نیست',
     'Device key is stored securely on this phone': 'کلید دستگاه به‌طور امن در این گوشی ذخیره شده است',
     'Add a device key to use automatic Connect': 'برای اتصال خودکار، کلید دستگاه را اضافه کنید',
     'Replace device key': 'جایگزینی کلید دستگاه',
