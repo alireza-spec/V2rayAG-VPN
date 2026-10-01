@@ -6,6 +6,7 @@ const SUB_PREFIX = "sub:";
 const PROFILE_PREFIX = "profile:";
 const LEASE_PREFIX = "lease:";
 const RATE_PREFIX = "rate:";
+const DEVICE_PREFIX = "device:";
 const MAX_LEASES_PER_MINUTE = 12;
 const LEASE_TTL_SECONDS = 12 * 60 * 60;
 const SUPPORTED_URI = /^(?:vless|vmess|trojan|ss|shadowsocks|hysteria2|wireguard|socks|http):\/\//i;
@@ -18,19 +19,23 @@ const ADMIN_HTML = `<!doctype html>
 <section id="login" class="card"><label for="key">Admin key</label><input id="key" type="password" autocomplete="current-password"><div class="row"><button id="loginBtn">Unlock</button><span id="loginMsg" class="status"></span></div></section>
 <main id="panel" class="hidden">
 <section class="card"><h2>Add subscriptions</h2><p class="muted">Paste one HTTPS subscription URL per line. Optionally use <code>Name | URL</code>. Keep this page private; never put the links in chat or source code. Maximum 100 entries per import.</p><label for="entries">URLs</label><textarea id="entries" spellcheck="false" placeholder="Europe 1 | https://provider.example/sub/...&#10;https://provider.example/sub/..."></textarea><div class="row"><button id="importBtn">Add subscriptions</button><button id="refreshBtn" class="secondary">Refresh subscription status</button></div><div id="actionMsg" class="status"></div></section>
-<section class="card"><div class="row"><h2 style="margin:0">Pool subscriptions</h2><button id="reloadBtn" class="secondary">Reload list</button><button id="deleteAllBtn" class="secondary danger">Delete all</button></div><p class="muted">A subscription is eligible only when its latest refresh includes usable configuration links and has not reported exhausted quota or expiry. Ping is measured by the app on the user's device, not by this panel.</p><div class="row"><input id="search" type="search" placeholder="Search by subscription name"><select id="statusFilter"><option value="">All statuses</option><option value="active">Active</option><option value="pending">Pending</option><option value="fetch_error">Fetch error</option><option value="expired">Expired</option><option value="exhausted">Quota exhausted</option><option value="unknown_quota">Unknown quota</option><option value="no_configs">No configs</option></select><span id="count" class="muted"></span></div><div class="table-wrap"><table><thead><tr><th>Name</th><th>Status</th><th>Configs</th><th>Quota</th><th>Expiry</th><th>Checked</th><th>Actions</th></tr></thead><tbody id="rows"><tr><td colspan="7" class="muted">Unlock to load.</td></tr></tbody></table></div></section></main>
+<section class="card"><div class="row"><h2 style="margin:0">Pool subscriptions</h2><button id="reloadBtn" class="secondary">Reload list</button><button id="deleteAllBtn" class="secondary danger">Delete all</button></div><p class="muted">A subscription is eligible only when its latest refresh includes usable configuration links and has not reported exhausted quota or expiry. Ping is measured by the app on the user's device, not by this panel.</p><div class="row"><input id="search" type="search" placeholder="Search by subscription name"><select id="statusFilter"><option value="">All statuses</option><option value="active">Active</option><option value="pending">Pending</option><option value="fetch_error">Fetch error</option><option value="expired">Expired</option><option value="exhausted">Quota exhausted</option><option value="unknown_quota">Unknown quota</option><option value="no_configs">No configs</option></select><span id="count" class="muted"></span></div><div class="table-wrap"><table><thead><tr><th>Name</th><th>Status</th><th>Configs</th><th>Quota</th><th>Expiry</th><th>Checked</th><th>Actions</th></tr></thead><tbody id="rows"><tr><td colspan="7" class="muted">Unlock to load.</td></tr></tbody></table></div></section>
+<section class="card"><h2>App device access</h2><p class="muted">Create a separate revocable access key for each approved app installation. A new key is shown only once; copy it directly into that app’s Settings. Never put the key in source code or chat.</p><label for="deviceName">Device label</label><input id="deviceName" maxlength="80" placeholder="e.g. Little Spring phone"><div class="row"><button id="createDeviceBtn">Issue device key</button><span id="deviceMsg" class="status"></span></div><div id="deviceTokenBox" class="hidden"><label for="deviceToken">Copy this key now; it will not be shown again</label><input id="deviceToken" readonly autocomplete="off"><button id="copyDeviceToken" class="secondary">Copy key</button></div><div class="table-wrap"><table><thead><tr><th>Device</th><th>Created</th><th>Last used</th><th>State</th><th>Action</th></tr></thead><tbody id="deviceRows"><tr><td colspan="5" class="muted">Unlock to load.</td></tr></tbody></table></div></section></main>
 <script>
 const $=s=>document.querySelector(s);let adminKey=sessionStorage.getItem('v2rayag_pool_admin')||'';const headers=()=>({'Authorization':'Bearer '+adminKey,'Content-Type':'application/json'});function status(el,msg){el.textContent=msg;}
 async function api(path,body){const r=await fetch('/admin/api/'+path,{method:body?'POST':'GET',headers:headers(),body:body?JSON.stringify(body):undefined});let d={};try{d=await r.json()}catch{}if(!r.ok||d.success===false)throw new Error(d.error||('Request failed ('+r.status+')'));return d;}
 async function load(){const d=await api('subscriptions');const all=d.subscriptions||[];const query=$('#search').value.trim().toLowerCase();const filter=$('#statusFilter').value;const visible=all.filter(s=>(!query||String(s.name+' '+(s.domain||'')).toLowerCase().includes(query))&&(!filter||s.status===filter));const body=$('#rows');body.replaceChildren();for(const s of visible){const tr=document.createElement('tr');for(const v of [s.name,s.status,s.configCount,quota(s),expiry(s),when(s.checkedAt)]){const td=document.createElement('td');td.textContent=v;tr.append(td)}const actions=document.createElement('td');const del=document.createElement('button');del.className='secondary danger';del.textContent='Delete';del.onclick=async()=>{if(!confirm('Delete subscription '+s.name+' and its saved configurations?'))return;del.disabled=true;try{const result=await api('delete',{id:s.id});status($('#actionMsg'),'Deleted '+s.name+' and '+result.deletedConfigs+' saved configuration(s).');await load()}catch(e){status($('#actionMsg'),e.message);del.disabled=false}};actions.append(del);tr.append(actions);body.append(tr)}$('#count').textContent=visible.length+' shown / '+all.length+' total';if(!visible.length){const tr=document.createElement('tr');const td=document.createElement('td');td.colSpan=7;td.textContent=all.length?'No subscriptions match this search/filter.':'No subscriptions yet.';tr.append(td);body.append(tr)}}
+async function loadDevices(){const d=await api('devices');const body=$('#deviceRows');body.replaceChildren();for(const item of d.devices||[]){const tr=document.createElement('tr');for(const value of [item.name,when(item.createdAt),when(item.lastUsedAt),item.active?'Active':'Revoked']){const td=document.createElement('td');td.textContent=value;tr.append(td)}const actions=document.createElement('td');if(item.active){const revoke=document.createElement('button');revoke.className='secondary danger';revoke.textContent='Revoke';revoke.onclick=async()=>{if(!confirm('Revoke access for '+item.name+'?'))return;revoke.disabled=true;try{await api('devices/revoke',{id:item.id});status($('#deviceMsg'),'Device access revoked.');await loadDevices()}catch(e){status($('#deviceMsg'),e.message);revoke.disabled=false}};actions.append(revoke)}tr.append(actions);body.append(tr)}if(!(d.devices||[]).length){const tr=document.createElement('tr');const td=document.createElement('td');td.colSpan=5;td.textContent='No device keys issued.';tr.append(td);body.append(tr)}}
 function quota(s){if(!s.total)return s.total===0&&s.quotaKnown?'No cap':'Unknown';const left=Math.max(0,s.total-(s.upload||0)-(s.download||0));return fmt(left)+' / '+fmt(s.total)}function fmt(n){if(!Number.isFinite(n))return'Unknown';const u=['B','KB','MB','GB','TB'];let i=0;while(n>=1024&&i<u.length-1){n/=1024;i++}return n.toFixed(i?1:0)+' '+u[i]}function expiry(s){return s.expiresAt?new Date(s.expiresAt*1000).toLocaleString():'Unknown'}function when(t){return t?new Date(t).toLocaleString():'Never'}
-$('#loginBtn').onclick=async()=>{adminKey=$('#key').value.trim();if(!adminKey)return status($('#loginMsg'),'Enter the admin key.');sessionStorage.setItem('v2rayag_pool_admin',adminKey);try{await load();$('#login').classList.add('hidden');$('#panel').classList.remove('hidden');status($('#loginMsg'),'')}catch(e){sessionStorage.removeItem('v2rayag_pool_admin');adminKey='';status($('#loginMsg'),e.message)}};
+$('#loginBtn').onclick=async()=>{adminKey=$('#key').value.trim();if(!adminKey)return status($('#loginMsg'),'Enter the admin key.');sessionStorage.setItem('v2rayag_pool_admin',adminKey);try{await load();await loadDevices();$('#login').classList.add('hidden');$('#panel').classList.remove('hidden');status($('#loginMsg'),'')}catch(e){sessionStorage.removeItem('v2rayag_pool_admin');adminKey='';status($('#loginMsg'),e.message)}};
 $('#reloadBtn').onclick=async()=>{try{await load();status($('#actionMsg'),'List updated.')}catch(e){status($('#actionMsg'),e.message)}};
 $('#search').addEventListener('input',()=>load().catch(e=>status($('#actionMsg'),e.message)));
 $('#statusFilter').addEventListener('change',()=>load().catch(e=>status($('#actionMsg'),e.message)));
 $('#deleteAllBtn').onclick=async()=>{if(!confirm('Delete ALL pool subscriptions and their saved configurations? This cannot be undone.'))return;const b=$('#deleteAllBtn');b.disabled=true;try{const result=await api('delete-all',{confirm:true});status($('#actionMsg'),'Deleted '+result.deletedSubscriptions+' subscription(s) and '+result.deletedConfigs+' configuration(s).');await load()}catch(e){status($('#actionMsg'),e.message)}finally{b.disabled=false}};
 $('#importBtn').onclick=async()=>{const text=$('#entries').value.trim();if(!text)return status($('#actionMsg'),'Paste at least one URL.');const markers=text.match(/Sub\\s+\\d+\\s*\\|\\s*https/gi)||[];const lines=(markers.length>1?text.split(/(?=Sub\\s+\\d+\\s*\\|\\s*https)/i):text.split(/\\r\\n|[\\n\\r\\u2028\\u2029]/)).map(x=>x.trim()).filter(Boolean);if(lines.length>100)return status($('#actionMsg'),'Maximum 100 URLs per import.');$('#importBtn').disabled=true;try{const d=await api('import',{lines});const rejected=d.errors||[];status($('#actionMsg'),'Processed '+lines.length+' input row(s); added '+d.added+' new subscription(s); '+d.duplicates+' duplicate(s) skipped; '+rejected.length+' rejected.'+(rejected.length?' Check input lines: '+rejected.map(x=>x.line).join(', '):'')+' Refresh status when ready.');$('#entries').value='';await load()}catch(e){status($('#actionMsg'),e.message)}finally{$('#importBtn').disabled=false}};
 $('#refreshBtn').onclick=async()=>{const b=$('#refreshBtn');b.disabled=true;let cursor=null,done=0;try{do{const d=await api('refresh',{cursor,limit:10});cursor=d.cursor||null;done+=d.checked;status($('#actionMsg'),'Refreshing '+done+' subscription(s)…');await load()}while(cursor);status($('#actionMsg'),'Refresh complete: '+done+' checked. Unknown quota or unreachable subscriptions are not offered to the app.')}catch(e){status($('#actionMsg'),'Stopped after '+done+' checks: '+e.message)}finally{b.disabled=false}};
+$('#createDeviceBtn').onclick=async()=>{const name=$('#deviceName').value.trim();if(!name)return status($('#deviceMsg'),'Enter a label for this device.');const b=$('#createDeviceBtn');b.disabled=true;try{const d=await api('devices/create',{name});$('#deviceToken').value=d.token;$('#deviceTokenBox').classList.remove('hidden');$('#deviceName').value='';status($('#deviceMsg'),'Key created. Copy it now; it cannot be recovered later.');await loadDevices()}catch(e){status($('#deviceMsg'),e.message)}finally{b.disabled=false}};
+$('#copyDeviceToken').onclick=async()=>{const token=$('#deviceToken').value;if(!token)return;try{await navigator.clipboard.writeText(token);status($('#deviceMsg'),'Key copied. Paste it only into the intended V2rayAG app.')}catch{const field=$('#deviceToken');field.focus();field.select();status($('#deviceMsg'),'Select and copy the key, then paste it into the intended app.')}};
 if(adminKey){$('#key').value=adminKey;$('#loginBtn').click()}
 </script></body></html>`;
 
@@ -40,11 +45,20 @@ function json(data, status = 200, headers = {}) {
 function randomInt(max) { return Math.floor(Math.random() * max); }
 function shuffle(array) { for (let i = array.length - 1; i > 0; i--) { const j = randomInt(i + 1); [array[i], array[j]] = [array[j], array[i]]; } return array; }
 async function digest(text) { const bytes = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text)); return [...new Uint8Array(bytes)].map(x => x.toString(16).padStart(2, "0")).join("").slice(0, 24); }
+async function sha256Hex(text) { const bytes = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text)); return [...new Uint8Array(bytes)].map(x => x.toString(16).padStart(2, "0")).join(""); }
 function randomToken() { const bytes = crypto.getRandomValues(new Uint8Array(32)); return [...bytes].map(x => x.toString(16).padStart(2, "0")).join(""); }
-async function allowLeaseRequest(request, env) {
+async function authenticateDevice(request, env) {
+  const authorization = request.headers.get("authorization") || "";
+  const token = authorization.startsWith("Bearer ") ? authorization.slice(7).trim() : "";
+  if (!/^[0-9a-f]{64}$/i.test(token)) return null;
+  const hash = await sha256Hex(token.toLowerCase());
+  const record = await env.POOL.get(DEVICE_PREFIX + hash, "json");
+  return record?.active === true ? { hash, record } : null;
+}
+async function allowLeaseRequest(request, env, deviceHash) {
   const ip = request.headers.get("cf-connecting-ip") || "unknown";
   const bucket = Math.floor(Date.now() / 60000);
-  const key = RATE_PREFIX + await digest(`${env.ADMIN_KEY || "pool"}\n${ip}\n${bucket}`);
+  const key = RATE_PREFIX + await digest(`${deviceHash}\n${ip}\n${bucket}`);
   const count = Number(await env.POOL.get(key) || 0);
   if (!Number.isFinite(count) || count >= MAX_LEASES_PER_MINUTE) return false;
   await env.POOL.put(key, String(count + 1), { expirationTtl: 120 });
@@ -175,6 +189,13 @@ async function deleteLeasesForSub(env, subId) {
   await Promise.all(names.map(name => env.POOL.delete(name)));
   return names.length;
 }
+async function deleteLeasesForDevice(env, deviceHash) {
+  const page = await env.POOL.list({ prefix: LEASE_PREFIX, limit: 1000 });
+  const records = await Promise.all(page.keys.map(k => env.POOL.get(k.name, "json")));
+  const names = page.keys.filter((_, i) => records[i]?.deviceHash === deviceHash).map(k => k.name);
+  await Promise.all(names.map(name => env.POOL.delete(name)));
+  return names.length;
+}
 function adminSummary(rec) {
   return { id: rec.id, name: rec.name, domain: rec.domain || (rec.url ? new URL(rec.url).hostname : ""), status: rec.status || "pending", configCount: rec.configCount || 0, upload: rec.upload || 0, download: rec.download || 0, total: rec.total, quotaKnown: Boolean(rec.quotaKnown), expiresAt: rec.expiresAt || null, checkedAt: rec.checkedAt || null };
 }
@@ -184,6 +205,38 @@ async function parseBody(request) {
 }
 async function adminApi(request, env, path) {
   if (!adminOK(request, env)) return json({ success:false, error: env.ADMIN_KEY ? "Unauthorized" : "Admin key has not been configured" }, env.ADMIN_KEY ? 401 : 503);
+  if (request.method === "GET" && path === "/admin/api/devices") {
+    const page = await env.POOL.list({ prefix: DEVICE_PREFIX, limit: 1000 });
+    const items = await Promise.all(page.keys.map(async key => {
+      const record = await env.POOL.get(key.name, "json");
+      if (!record) return null;
+      return { id: key.name.slice(DEVICE_PREFIX.length), name: record.name, active: record.active === true, createdAt: record.createdAt || null, lastUsedAt: record.lastUsedAt || null };
+    }));
+    return json({ success:true, devices:items.filter(Boolean).sort((a,b)=>(b.createdAt||0)-(a.createdAt||0)) });
+  }
+  if (request.method === "POST" && path === "/admin/api/devices/create") {
+    const body = await parseBody(request);
+    const name = String(body.name || "").replace(/[\x00-\x1F\x7F]/g, " ").trim().slice(0, 80);
+    if (!name) return json({ success:false, error:"A device label is required" }, 400);
+    const page = await env.POOL.list({ prefix:DEVICE_PREFIX, limit:1000 });
+    const records = await Promise.all(page.keys.map(key => env.POOL.get(key.name, "json")));
+    if (records.filter(record => record?.active === true).length >= 100) return json({ success:false, error:"Maximum 100 active device keys" }, 400);
+    const token = randomToken();
+    const id = await sha256Hex(token);
+    await env.POOL.put(DEVICE_PREFIX + id, JSON.stringify({ name, active:true, createdAt:Date.now(), lastUsedAt:null }));
+    return json({ success:true, id, name, token });
+  }
+  if (request.method === "POST" && path === "/admin/api/devices/revoke") {
+    const body = await parseBody(request);
+    const id = String(body.id || "");
+    if (!/^[0-9a-f]{64}$/.test(id)) return json({ success:false, error:"Invalid device id" }, 400);
+    const key = DEVICE_PREFIX + id;
+    const record = await env.POOL.get(key, "json");
+    if (!record) return json({ success:false, error:"Device not found" }, 404);
+    await env.POOL.put(key, JSON.stringify({ ...record, active:false, revokedAt:Date.now() }));
+    const deletedLeases = await deleteLeasesForDevice(env, id);
+    return json({ success:true, revoked:true, deletedLeases });
+  }
   if (request.method === "GET" && path === "/admin/api/subscriptions") {
     const subs = await listSubscriptions(env);
     return json({ success:true, subscriptions: subs.map(adminSummary).sort((a,b)=>a.name.localeCompare(b.name)) });
@@ -233,9 +286,12 @@ async function adminApi(request, env, path) {
   return json({ success:false, error:"Not found" }, 404);
 }
 async function acquirePoolLease(request, env) {
-  if (!(await allowLeaseRequest(request, env))) {
+  const device = await authenticateDevice(request, env);
+  if (!device) return json({ success:false, error:"This app installation is not authorized. Set up device access in the app settings." }, 401);
+  if (!(await allowLeaseRequest(request, env, device.hash))) {
     return json({ success:false, error:"Connection attempts are temporarily limited. Please wait a minute and try again." }, 429);
   }
+  await env.POOL.put(DEVICE_PREFIX + device.hash, JSON.stringify({ ...device.record, lastUsedAt:Date.now() }));
   const body = await parseBody(request);
   const excluded = new Set(Array.isArray(body.exclude)
     ? body.exclude.filter(id => typeof id === "string" && /^[0-9a-f]{24}$/.test(id)).slice(0, 100)
@@ -252,7 +308,7 @@ async function acquirePoolLease(request, env) {
     const sub = profile?.subId ? byId.get(profile.subId) : null;
     if (!profile?.uri || !sub) continue;
     const leaseId = randomToken();
-    const lease = { subId: sub.id, profileId: id, createdAt: Date.now() };
+    const lease = { subId: sub.id, profileId: id, deviceHash:device.hash, createdAt: Date.now() };
     await env.POOL.put(LEASE_PREFIX + leaseId, JSON.stringify(lease), { expirationTtl: LEASE_TTL_SECONDS });
     return json({
       success:true,
@@ -273,11 +329,14 @@ async function acquirePoolLease(request, env) {
   return json({ success:false, error:"No refreshed subscription currently has usable quota and configurations." }, 503);
 }
 async function releasePoolLease(request, env) {
+  const device = await authenticateDevice(request, env);
+  if (!device) return json({ success:false, error:"Unauthorized" }, 401);
   const body = await parseBody(request);
   const leaseId = typeof body.leaseId === "string" ? body.leaseId : "";
   if (!/^[0-9a-f]{64}$/.test(leaseId)) return json({ success:false, error:"Invalid lease token." }, 400);
   const key = LEASE_PREFIX + leaseId;
   const existing = await env.POOL.get(key, "json");
+  if (existing && existing.deviceHash !== device.hash) return json({ success:false, error:"Lease not found" }, 404);
   if (existing) await env.POOL.delete(key);
   return json({ success:true, released:Boolean(existing) });
 }
@@ -286,7 +345,7 @@ export default {
   async fetch(request, env) {
     const url = new URL(request.url); const path = url.pathname.replace(/\/$/, "") || "/";
     if (request.method === "OPTIONS") return new Response(null,{status:204,headers:{"access-control-allow-origin":"*","access-control-allow-methods":"GET,POST,OPTIONS","access-control-allow-headers":"authorization,content-type","access-control-max-age":"600"}});
-    if (path === "/healthz" && request.method === "GET") return json({ ok:true, service:"V2rayAG private pool", version:2 });
+    if (path === "/healthz" && request.method === "GET") return json({ ok:true, service:"V2rayAG private pool", version:3 });
     if (path === "/admin" && request.method === "GET") return new Response(ADMIN_HTML,{headers:{"content-type":"text/html; charset=utf-8","cache-control":"no-store","x-content-type-options":"nosniff","content-security-policy":"default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'"}});
     if (path.startsWith("/admin/api/")) {
       if (request.method !== "GET" && request.method !== "POST") return json({success:false,error:"Method not allowed"},405);

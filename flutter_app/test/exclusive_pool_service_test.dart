@@ -64,6 +64,15 @@ void main() {
       expect(candidate.unlimitedQuota, isFalse);
     });
 
+    test('rejects invalid device access keys before secure storage writes', () async {
+      final service = ExclusivePoolService();
+      await expectLater(
+        service.saveDeviceAccessToken('not-a-device-key'),
+        throwsFormatException,
+      );
+      service.dispose();
+    });
+
     test('rejects malformed leases and profiles', () {
       expect(
         () => ExclusivePoolService.parseLease({'success': false}),

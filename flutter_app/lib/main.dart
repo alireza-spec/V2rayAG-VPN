@@ -243,6 +243,7 @@ class _VpnShellState extends State<VpnShell> {
   bool _poolSearching = false;
   bool _cancelPoolSearch = false;
   bool _poolSummaryRestored = false;
+  bool _poolDeviceKeyConfigured = false;
   PoolConnectionSummary? _activePoolSummary;
   String? _activePoolLeaseId;
   static const _activePoolSummaryKey = 'active_pool_summary_v1';
@@ -273,6 +274,7 @@ class _VpnShellState extends State<VpnShell> {
     _restoreProfiles();
     _restoreExcludedPackages();
     _restorePoolSummary();
+    _restorePoolDeviceKeyState();
     _restoreConnectionMode();
   }
 
@@ -442,6 +444,79 @@ class _VpnShellState extends State<VpnShell> {
       }
     } on Object {
       // Session recovery still works through native state even if labels cannot persist.
+    }
+  }
+
+  Future<void> _restorePoolDeviceKeyState() async {
+    final configured = await _exclusivePool.hasDeviceAccessToken();
+    if (mounted) setState(() => _poolDeviceKeyConfigured = configured);
+  }
+
+  Future<void> _configurePoolDeviceKey() async {
+    final controller = TextEditingController();
+    final saved = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: Text(dialogContext.tr('Set up automatic pool access')),
+        content: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Text(dialogContext.tr('Create a device key in the private pool admin panel, then paste it here. It is stored securely on this device and never included in the app build.')),
+          const SizedBox(height: 14),
+          TextField(
+            controller: controller,
+            obscureText: true,
+            autocorrect: false,
+            enableSuggestions: false,
+            decoration: InputDecoration(
+              labelText: dialogContext.tr('Device access key'),
+              border: const OutlineInputBorder(),
+            ),
+          ),
+        ]),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(dialogContext, false), child: Text(dialogContext.tr('Cancel'))),
+          FilledButton(onPressed: () => Navigator.pop(dialogContext, true), child: Text(dialogContext.tr('Save securely'))),
+        ],
+      ),
+    );
+    if (saved == true) {
+      try {
+        await _exclusivePool.saveDeviceAccessToken(controller.text);
+        if (mounted) {
+          setState(() => _poolDeviceKeyConfigured = true);
+          _showMessage('Device access key saved securely on this device.');
+        }
+      } on FormatException catch (error) {
+        if (mounted) _showMessage(error.message);
+      } on Object {
+        if (mounted) _showMessage('Could not save the device access key securely.');
+      }
+    }
+    controller.clear();
+    controller.dispose();
+  }
+
+  Future<void> _removePoolDeviceKey() async {
+    if (_engine.connected || _engine.connecting || _poolSearching) {
+      _showMessage('Disconnect before removing automatic pool access.');
+      return;
+    }
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: Text(dialogContext.tr('Remove device access?')),
+        content: Text(dialogContext.tr('This device will no longer connect to the automatic pool until a valid device key is added again.')),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(dialogContext, false), child: Text(dialogContext.tr('Cancel'))),
+          FilledButton(onPressed: () => Navigator.pop(dialogContext, true), child: Text(dialogContext.tr('Remove'))),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+    try {
+      await _exclusivePool.clearDeviceAccessToken();
+      if (mounted) setState(() => _poolDeviceKeyConfigured = false);
+    } on Object {
+      if (mounted) _showMessage('Could not remove the device access key.');
     }
   }
 
@@ -1303,6 +1378,9 @@ class _VpnShellState extends State<VpnShell> {
         onThemeChanged: widget.onThemeChanged,
         onEditAppRouting: _editExcludedApps,
         excludedAppsCount: _excludedPackages.length,
+        poolAccessConfigured: _poolDeviceKeyConfigured,
+        onConfigurePoolAccess: _configurePoolDeviceKey,
+        onRemovePoolAccess: _removePoolDeviceKey,
       ),
     ];
 
@@ -2068,6 +2146,9 @@ class _SettingsPage extends StatelessWidget {
     required this.onThemeChanged,
     required this.onEditAppRouting,
     required this.excludedAppsCount,
+    required this.poolAccessConfigured,
+    required this.onConfigurePoolAccess,
+    required this.onRemovePoolAccess,
   });
 
   final Locale locale;
@@ -2080,6 +2161,9 @@ class _SettingsPage extends StatelessWidget {
   final ValueChanged<bool> onThemeChanged;
   final VoidCallback onEditAppRouting;
   final int excludedAppsCount;
+  final bool poolAccessConfigured;
+  final VoidCallback onConfigurePoolAccess;
+  final VoidCallback onRemovePoolAccess;
 
   @override
   Widget build(BuildContext context) => ListView(padding: const EdgeInsets.fromLTRB(20, 18, 20, 28), children: [
@@ -2115,6 +2199,32 @@ class _SettingsPage extends StatelessWidget {
                 : '$excludedAppsCount apps excluded from VPN'),
             trailing: const Icon(Icons.chevron_right_rounded),
             onTap: onEditAppRouting,
+          ),
+          const Divider(height: 1, indent: 16, endIndent: 16),
+          ListTile(
+            leading: const Icon(Icons.key_rounded),
+            title: const LocalizedText('Automatic pool access'),
+            subtitle: LocalizedText(poolAccessConfigured
+                ? 'Device key is stored securely on this phone'
+                : 'Add a device key to use automatic Connect'),
+            trailing: const Icon(Icons.chevron_right_rounded),
+            onTap: onConfigurePoolAccess,
+          ),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
+            child: Wrap(spacing: 8, children: [
+              OutlinedButton.icon(
+                onPressed: onConfigurePoolAccess,
+                icon: const Icon(Icons.key_rounded),
+                label: LocalizedText(poolAccessConfigured ? 'Replace device key' : 'Set up device key'),
+              ),
+              if (poolAccessConfigured)
+                TextButton.icon(
+                  onPressed: onRemovePoolAccess,
+                  icon: const Icon(Icons.delete_outline_rounded),
+                  label: const LocalizedText('Remove key'),
+                ),
+            ]),
           ),
         ])),
         const SizedBox(height: 16),

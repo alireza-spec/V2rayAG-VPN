@@ -1,6 +1,8 @@
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
+
 import 'vpn_profile.dart';
 
 /// Safe display-only metadata for an automatic pool connection.
@@ -137,15 +139,20 @@ class ExclusivePoolLease {
 }
 
 class ExclusivePoolService {
-  ExclusivePoolService({HttpClient? client, Uri? endpoint})
-      : _client = client ?? HttpClient(),
+  ExclusivePoolService({
+    HttpClient? client,
+    FlutterSecureStorage? storage,
+    Uri? endpoint,
+  })  : _client = client ?? HttpClient(),
         _ownsClient = client == null,
+        _storage = storage ?? const FlutterSecureStorage(),
         endpoint = endpoint ?? Uri.parse(_defaultEndpoint);
 
   static const _defaultEndpoint =
       'https://v2rayag-app-pool-control.littlespring00.workers.dev';
   static const maxResponseBytes = 128 * 1024;
   static const maxProfileBytes = 16 * 1024;
+  static const _deviceTokenKey = 'v2rayag_pool_device_access_v1';
   static const _supportedSchemes = {
     'vless', 'vmess', 'ss', 'shadowsocks', 'trojan', 'socks',
     'hysteria2', 'wireguard', 'http',
@@ -153,13 +160,42 @@ class ExclusivePoolService {
 
   final HttpClient _client;
   final bool _ownsClient;
+  final FlutterSecureStorage _storage;
   final Uri endpoint;
+
+  Future<bool> hasDeviceAccessToken() async => (await _readDeviceToken()) != null;
+
+  Future<void> saveDeviceAccessToken(String rawToken) async {
+    final token = rawToken.trim().toLowerCase();
+    if (!RegExp(r'^[0-9a-f]{64}$').hasMatch(token)) {
+      throw const FormatException('Device key must be 64 hexadecimal characters.');
+    }
+    await _storage.write(key: _deviceTokenKey, value: token);
+  }
+
+  Future<void> clearDeviceAccessToken() async {
+    await _storage.delete(key: _deviceTokenKey);
+  }
+
+  Future<String?> _readDeviceToken() async {
+    try {
+      final token = (await _storage.read(key: _deviceTokenKey))?.trim().toLowerCase();
+      if (token == null || !RegExp(r'^[0-9a-f]{64}$').hasMatch(token)) return null;
+      return token;
+    } on Object {
+      return null;
+    }
+  }
 
   Future<ExclusivePoolLease> acquireLease({Set<String> excludeIds = const {}}) async {
     final excluded = excludeIds
         .where((id) => RegExp(r'^[0-9a-f]{24}$').hasMatch(id))
         .take(100)
         .toList(growable: false);
+    final deviceToken = await _readDeviceToken();
+    if (deviceToken == null) {
+      throw const FormatException('Set up automatic pool access in Settings before connecting.');
+    }
     final uri = endpoint.replace(path: '/v1/pool/leases', query: null);
     if (uri.scheme != 'https' || uri.host.isEmpty || uri.userInfo.isNotEmpty) {
       throw const FormatException('The secure server pool is not configured.');
@@ -171,6 +207,7 @@ class ExclusivePoolService {
       request.headers.set(HttpHeaders.acceptHeader, 'application/json');
       request.headers.set(HttpHeaders.contentTypeHeader, 'application/json; charset=utf-8');
       request.headers.set(HttpHeaders.userAgentHeader, 'V2rayAG');
+      request.headers.set(HttpHeaders.authorizationHeader, 'Bearer $deviceToken');
       request.write(jsonEncode({'exclude': excluded}));
       final response = await request.close().timeout(const Duration(seconds: 15));
       final bytes = await _readResponse(response);
@@ -193,6 +230,8 @@ class ExclusivePoolService {
 
   Future<void> releaseLease(String leaseId) async {
     if (!RegExp(r'^[0-9a-f]{64}$').hasMatch(leaseId)) return;
+    final deviceToken = await _readDeviceToken();
+    if (deviceToken == null) return;
     try {
       final uri = endpoint.replace(path: '/v1/pool/leases/release', query: null);
       if (uri.scheme != 'https' || uri.host.isEmpty || uri.userInfo.isNotEmpty) return;
@@ -201,6 +240,7 @@ class ExclusivePoolService {
       request.headers.set(HttpHeaders.acceptHeader, 'application/json');
       request.headers.set(HttpHeaders.contentTypeHeader, 'application/json; charset=utf-8');
       request.headers.set(HttpHeaders.userAgentHeader, 'V2rayAG');
+      request.headers.set(HttpHeaders.authorizationHeader, 'Bearer $deviceToken');
       request.write(jsonEncode({'leaseId': leaseId}));
       final response = await request.close().timeout(const Duration(seconds: 8));
       await response.drain<void>();
