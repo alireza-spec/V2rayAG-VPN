@@ -194,14 +194,14 @@ jobs:
           </layer-list>
           ''')
 
-          styles = res / 'values-v31' / 'styles.xml'
-          if not styles.is_file():
-              raise SystemExit('Android 12 splash theme was not generated')
-          text = styles.read_text()
+          base_styles = res / 'values' / 'styles.xml'
+          if not base_styles.is_file():
+              raise SystemExit('Generated Android theme styles were not found')
+          text = base_styles.read_text()
           pattern = re.compile(r'(<style\s+name="LaunchTheme"[^>]*>)(.*?)(</style>)', re.S)
           match = pattern.search(text)
           if not match:
-              raise SystemExit('Could not find Android 12 LaunchTheme')
+              raise SystemExit('Could not find generated LaunchTheme')
           body = match.group(2)
           for name, value in (
               ('android:windowSplashScreenBackground', '#0B100E'),
@@ -214,8 +214,14 @@ jobs:
                   body = item.sub(replacement, body, count=1)
               else:
                   body += chr(10) + '        ' + replacement
-          text = text[:match.start(2)] + body + text[match.end(2):]
-          styles.write_text(text)
+          launch_style = match.group(1) + body + match.group(3)
+          target = res / 'values-v31' / 'styles.xml'
+          target.parent.mkdir(parents=True, exist_ok=True)
+          target.write_text('''<?xml version="1.0" encoding="utf-8"?>
+          <resources>
+          ''' + launch_style + '''
+          </resources>
+          ''')
           print('Android 12 and legacy launch screens use the crisp V2rayAG mark.')
           PY
 
