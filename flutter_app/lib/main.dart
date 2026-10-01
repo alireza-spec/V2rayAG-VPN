@@ -487,8 +487,12 @@ class _VpnShellState extends State<VpnShell> {
         }
       } on FormatException catch (error) {
         if (mounted) _showMessage(error.message);
-      } on Object {
-        if (mounted) _showMessage('Could not save the device access key securely.');
+      } on Object catch (error) {
+        if (mounted) {
+          _showMessage(
+            'Could not save the device access key securely (${_safeStorageFailure(error)}).',
+          );
+        }
       }
     }
     controller.clear();

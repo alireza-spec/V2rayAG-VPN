@@ -145,7 +145,14 @@ class ExclusivePoolService {
     Uri? endpoint,
   })  : _client = client ?? HttpClient(),
         _ownsClient = client == null,
-        _storage = storage ?? const FlutterSecureStorage(),
+        _storage = storage ??
+            FlutterSecureStorage(
+              aOptions: AndroidOptions(
+                storageNamespace: 'v2rayag_pool_device_v1',
+                migrateWithBackup: false,
+                resetOnError: false,
+              ),
+            ),
         endpoint = endpoint ?? Uri.parse(_defaultEndpoint);
 
   static const _defaultEndpoint =
@@ -171,6 +178,10 @@ class ExclusivePoolService {
       throw const FormatException('Device key must be 64 hexadecimal characters.');
     }
     await _storage.write(key: _deviceTokenKey, value: token);
+    final savedToken = (await _storage.read(key: _deviceTokenKey))?.trim().toLowerCase();
+    if (savedToken != token) {
+      throw StateError('Device access key secure-storage read-back verification failed.');
+    }
   }
 
   Future<void> clearDeviceAccessToken() async {

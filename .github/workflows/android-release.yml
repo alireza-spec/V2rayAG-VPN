@@ -250,6 +250,9 @@ jobs:
               <exclude domain="sharedpref" path="v2rayag_secure_store_v3.xml" />
               <exclude domain="sharedpref" path="FlutterSecureKeyStorage:v2rayag_secure_store_v3.xml" />
               <exclude domain="sharedpref" path="FlutterSecureStorageConfiguration:v2rayag_secure_store_v3.xml" />
+              <exclude domain="sharedpref" path="v2rayag_pool_device_v1.xml" />
+              <exclude domain="sharedpref" path="FlutterSecureKeyStorage:v2rayag_pool_device_v1.xml" />
+              <exclude domain="sharedpref" path="FlutterSecureStorageConfiguration:v2rayag_pool_device_v1.xml" />
           </full-backup-content>
           ''')
           (xml_dir / 'secure_storage_data_extraction_rules.xml').write_text('''<?xml version="1.0" encoding="utf-8"?>
@@ -264,6 +267,9 @@ jobs:
                   <exclude domain="sharedpref" path="v2rayag_secure_store_v3.xml" />
                   <exclude domain="sharedpref" path="FlutterSecureKeyStorage:v2rayag_secure_store_v3.xml" />
                   <exclude domain="sharedpref" path="FlutterSecureStorageConfiguration:v2rayag_secure_store_v3.xml" />
+                  <exclude domain="sharedpref" path="v2rayag_pool_device_v1.xml" />
+                  <exclude domain="sharedpref" path="FlutterSecureKeyStorage:v2rayag_pool_device_v1.xml" />
+                  <exclude domain="sharedpref" path="FlutterSecureStorageConfiguration:v2rayag_pool_device_v1.xml" />
               </cloud-backup>
               <device-transfer>
                   <exclude domain="sharedpref" path="FlutterSecureStorage.xml" />
@@ -275,6 +281,9 @@ jobs:
                   <exclude domain="sharedpref" path="v2rayag_secure_store_v3.xml" />
                   <exclude domain="sharedpref" path="FlutterSecureKeyStorage:v2rayag_secure_store_v3.xml" />
                   <exclude domain="sharedpref" path="FlutterSecureStorageConfiguration:v2rayag_secure_store_v3.xml" />
+                  <exclude domain="sharedpref" path="v2rayag_pool_device_v1.xml" />
+                  <exclude domain="sharedpref" path="FlutterSecureKeyStorage:v2rayag_pool_device_v1.xml" />
+                  <exclude domain="sharedpref" path="FlutterSecureStorageConfiguration:v2rayag_pool_device_v1.xml" />
               </device-transfer>
           </data-extraction-rules>
           ''')
