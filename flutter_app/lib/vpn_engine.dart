@@ -18,6 +18,14 @@ bool shouldRetryConfigRejectedProfile(String? category) =>
     category == 'InvalidConfiguration' ||
     category == 'PlatformException:INVALID_CONFIG';
 
+/// Sorts measured delay values before inconclusive probes without treating an
+/// unreachable test endpoint as proof that a server is unusable.
+int compareMeasuredLatency(int? leftMs, int? rightMs) {
+  if (leftMs == null) return rightMs == null ? 0 : 1;
+  if (rightMs == null) return -1;
+  return leftMs.compareTo(rightMs);
+}
+
 /// Android VPN bridge. Other platforms deliberately remain disabled until their
 /// native projects and signing/entitlement setup are added and tested.
 class VpnEngine extends ChangeNotifier {
@@ -37,6 +45,8 @@ class VpnEngine extends ChangeNotifier {
   VlessStatus _status = VlessStatus();
   bool _initialized = false;
   bool _busy = false;
+  bool _pingBusy = false;
+  int _pingGeneration = 0;
   bool _startPending = false;
   bool _awaitingStartStatus = false;
   bool _stopPending = false;
@@ -62,6 +72,7 @@ class VpnEngine extends ChangeNotifier {
   VlessStatus get status => _status;
   bool get initialized => _initialized;
   bool get busy => _busy;
+  bool get pingBusy => _pingBusy;
   String? get message => _message;
   String? get coreVersion => _coreVersion;
   String? get failureCategory => _failureCategory;
@@ -221,6 +232,8 @@ class VpnEngine extends ChangeNotifier {
         break;
       case VlessConnectionState.disconnected:
         _ignoreConnectedUntilDisconnected = false;
+        _pingGeneration++;
+        _pingBusy = false;
         _endSession();
         if (_stopPending) {
           _stopPending = false;
@@ -291,6 +304,8 @@ class VpnEngine extends ChangeNotifier {
     List<String> blockedApps = const [],
   }) async {
     if (!canStart) return false;
+    _pingGeneration++;
+    _pingBusy = false;
     _busy = true;
     _startPending = true;
     _awaitingStartStatus = false;
@@ -477,6 +492,8 @@ class VpnEngine extends ChangeNotifier {
     if (_busy || (!connected && !connecting && !disconnecting)) {
       return false;
     }
+    _pingGeneration++;
+    _pingBusy = false;
     _busy = true;
     _stopPending = true;
     _awaitingStartStatus = false;
@@ -502,55 +519,73 @@ class VpnEngine extends ChangeNotifier {
   }
 
   Future<int?> measurePing(
-    VpnProfile profile, {
+    VpnProfile? profile, {
     bool batchScan = false,
+    bool automaticSelection = false,
   }) async {
-    if (!_initialized || _busy || connecting || disconnecting) return null;
-    _busy = true;
+    final connectedAtStart = connected;
+    if (!_initialized || _busy || _pingBusy || connecting || disconnecting ||
+        (!connectedAtStart && profile == null)) {
+      return null;
+    }
+    final generation = ++_pingGeneration;
+    _pingBusy = true;
+    // A disconnected profile probe occupies the engine while its native
+    // temporary core runs. A connected-path ping does not lock Disconnect.
+    if (!connectedAtStart) _busy = true;
     _phase = 'latency-check';
     _failureCategory = null;
     _message = null;
     _lastPingMs = null;
     _notify();
     try {
-      final urls = batchScan ? _batchProbeUrls : _probeUrls;
-      final timeout = Duration(seconds: batchScan ? 4 : 5);
+      final urls = automaticSelection || batchScan
+          ? _batchProbeUrls
+          : _probeUrls;
+      final timeout = Duration(seconds: batchScan || automaticSelection ? 4 : 5);
       for (final url in urls) {
         try {
-          final result = connected
+          final result = connectedAtStart
               ? await _client
                   .getConnectedServerDelay(url: url)
                   .timeout(timeout)
               : await _client
-                  .getServerDelay(config: profile.config, url: url)
+                  .getServerDelay(config: profile!.config, url: url)
                   .timeout(timeout);
+          if (generation != _pingGeneration) return null;
           if (result >= 0) {
             _lastPingMs = result;
             break;
           }
         } on Object catch (error) {
+          if (generation != _pingGeneration) return null;
           _failureCategory = _categoryFor(error);
         }
       }
+      if (generation != _pingGeneration) return null;
       if (_lastPingMs == null) {
         _phase = 'latency-failed';
         _failureCategory ??= 'NoDelayResult';
-        _message = connected
+        _message = connectedAtStart
             ? 'The VPN is active, but the network health check did not get a response. Try another server or review DNS/network settings.'
             : 'Could not get a latency result. Try another profile or review connection details.';
       } else {
-        _phase = connected ? 'connected' : 'latency-ok';
+        _phase = connectedAtStart ? 'connected' : 'latency-ok';
         _failureCategory = null;
       }
       return _lastPingMs;
     } on Object catch (error) {
+      if (generation != _pingGeneration) return null;
       _phase = 'latency-failed';
       _failureCategory = _categoryFor(error);
       _message = 'Could not get a latency result. Try another profile or review connection details.';
       return null;
     } finally {
-      _busy = false;
-      _notify();
+      if (generation == _pingGeneration) {
+        _pingBusy = false;
+        if (!connectedAtStart) _busy = false;
+        _notify();
+      }
     }
   }
 

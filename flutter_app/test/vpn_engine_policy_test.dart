@@ -29,4 +29,17 @@ void main() {
       expect(shouldRetryConfigRejectedProfile('Timeout'), isFalse);
     });
   });
+
+  group('automatic pool latency ranking', () {
+    test('prefers lower measured delay and leaves inconclusive probes last', () {
+      final values = <int?>[null, 92, 48, null, 310];
+      values.sort(compareMeasuredLatency);
+      expect(values, <int?>[48, 92, 310, null, null]);
+    });
+
+    test('does not pretend an inconclusive probe is a zero-millisecond route', () {
+      expect(compareMeasuredLatency(null, 1), greaterThan(0));
+      expect(compareMeasuredLatency(0, null), lessThan(0));
+    });
+  });
 }

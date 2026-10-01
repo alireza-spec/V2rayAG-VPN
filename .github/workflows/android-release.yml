@@ -153,6 +153,7 @@ jobs:
         run: |
           set -euo pipefail
           cp -R android_brand/res/. android/app/src/main/res/
+          test -s android/app/src/main/res/drawable-nodpi/ic_v2rayag_notification.png
           python3 - <<'PY'
           from pathlib import Path
           import re
@@ -349,6 +350,48 @@ jobs:
 
       - name: Resolve dependencies
         run: flutter pub get
+
+      - name: Ensure the custom V2rayAG notification glyph is used as fallback
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import os
+
+          pub_cache = Path(os.environ.get('PUB_CACHE', Path.home() / '.pub-cache'))
+          rel = Path('android/src/main/kotlin/com/github/tfox/flutter_vless/xray/service/XrayVPNService.kt')
+          candidates = [
+              pub_cache / 'hosted/pub.dev/flutter_vless_android-1.1.6' / rel,
+              pub_cache / 'hosted/pub.dartlang.org/flutter_vless_android-1.1.6' / rel,
+          ]
+          service = next((path for path in candidates if path.exists()), None)
+          if service is None:
+              raise SystemExit('Pinned flutter_vless_android 1.1.6 service source was not found')
+          text = service.read_text()
+          marker = 'val resolvedV2rayAgSmallIcon = current?.let { profile ->'
+          old_icon = '.setSmallIcon(current?.APPLICATION_ICON?.takeIf { it != 0 } ?: android.R.drawable.ic_dialog_info)'
+          if marker not in text:
+              anchor = '        val current = config\n'
+              if anchor not in text:
+                  raise SystemExit('Could not locate the VPN notification setup in the pinned engine')
+              icon_setup = '''        val current = config
+          val resolvedV2rayAgSmallIcon = current?.let { profile ->
+              val name = profile.NOTIFICATION_ICON_RESOURCE_NAME.ifBlank { "ic_v2rayag_notification" }
+              val type = profile.NOTIFICATION_ICON_RESOURCE_TYPE.ifBlank { "drawable" }
+              resources.getIdentifier(name, type, packageName).takeIf { it != 0 }
+          }
+          val smallIcon = current?.APPLICATION_ICON?.takeIf { it != 0 }
+              ?: resolvedV2rayAgSmallIcon
+              ?: applicationInfo.icon.takeIf { it != 0 }
+              ?: android.R.drawable.ic_dialog_info
+          '''
+              text = text.replace(anchor, icon_setup, 1)
+          if old_icon in text:
+              text = text.replace(old_icon, '.setSmallIcon(smallIcon)', 1)
+          elif '.setSmallIcon(smallIcon)' not in text:
+              raise SystemExit('Could not replace the generic notification fallback icon')
+          service.write_text(text)
+          print('V2rayAG notification-icon fallback is configured in the native service.')
+          PY
 
       - name: Analyze Dart code
         run: flutter analyze --no-pub

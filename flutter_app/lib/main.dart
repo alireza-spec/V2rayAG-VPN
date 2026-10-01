@@ -28,6 +28,13 @@ const _canvas = Color(0xFFF6F7F3);
 
 enum _SubscriptionSaveChoice { saved, useOnce, cancelled }
 
+class _PoolCandidateProbe {
+  const _PoolCandidateProbe({required this.lease, required this.latencyMs});
+
+  final ExclusivePoolLease lease;
+  final int? latencyMs;
+}
+
 /// Keep the connection control available to stop an orphaned native VPN
 /// session even when secure storage could not restore its selected profile.
 bool canToggleVpnAction({
@@ -244,6 +251,8 @@ class _VpnShellState extends State<VpnShell> {
   bool _cancelPoolSearch = false;
   bool _poolSummaryRestored = false;
   PoolConnectionSummary? _activePoolSummary;
+  VpnProfile? _activePoolProfile;
+  bool _activePoolPingChecked = false;
   String? _activePoolLeaseId;
   static const _activePoolSummaryKey = 'active_pool_summary_v1';
   final Map<int, int> _profilePings = {};
@@ -593,6 +602,8 @@ class _VpnShellState extends State<VpnShell> {
         _engine.initialized && !_engine.connected && !_engine.connecting &&
         !_engine.disconnecting && !_poolSearching) {
       _activePoolSummary = null;
+      _activePoolProfile = null;
+      _activePoolPingChecked = false;
       unawaited(_persistPoolSummary(null));
       unawaited(_releaseActivePoolLease());
     }
@@ -622,7 +633,11 @@ class _VpnShellState extends State<VpnShell> {
       if (isActive) await _engine.disconnect();
       await _releaseActivePoolLease();
       if (mounted && !_engine.connected) {
-        setState(() => _activePoolSummary = null);
+        setState(() {
+          _activePoolSummary = null;
+          _activePoolProfile = null;
+          _activePoolPingChecked = false;
+        });
         unawaited(_persistPoolSummary(null));
       }
       return;
@@ -634,7 +649,11 @@ class _VpnShellState extends State<VpnShell> {
         : null;
     if (profile != null) {
       await _releaseActivePoolLease();
-      setState(() => _activePoolSummary = null);
+      setState(() {
+        _activePoolSummary = null;
+        _activePoolProfile = null;
+        _activePoolPingChecked = false;
+      });
       unawaited(_persistPoolSummary(null));
       await _engine.connect(
         profile,
@@ -655,58 +674,125 @@ class _VpnShellState extends State<VpnShell> {
       _showMessage('The VPN engine is not ready yet. Try again in a moment.');
       return;
     }
-    const maxAttempts = 8;
+    // The private Worker allows 12 leases per device per minute. Sample only
+    // five, leaving room for a user retry while testing a useful variety of
+    // profiles from across the active subscription pool.
+    const candidateSampleLimit = 5;
     final triedIds = <String>{};
-    var attempts = 0;
+    final probes = <_PoolCandidateProbe>[];
+    String? retainedLeaseId;
+    _activePoolLeaseId = null;
     setState(() {
       _poolSearching = true;
       _cancelPoolSearch = false;
       _activePoolSummary = null;
+      _activePoolProfile = null;
+      _activePoolPingChecked = false;
     });
     unawaited(_persistPoolSummary(null));
+    _PoolCandidateProbe? bestNativeOnlyFallback;
     try {
-      while (attempts < maxAttempts && !_cancelPoolSearch) {
+      for (var i = 0; i < candidateSampleLimit && !_cancelPoolSearch; i++) {
         final lease = await _exclusivePool.acquireLease(excludeIds: triedIds);
-        final candidate = lease.candidate;
-        if (_cancelPoolSearch) {
+        if (!triedIds.add(lease.candidate.id)) {
           await _exclusivePool.releaseLease(lease.leaseId);
           break;
         }
-        if (!triedIds.add(candidate.id)) {
-          await _exclusivePool.releaseLease(lease.leaseId);
-          break;
-        }
-        attempts++;
-        var keepLease = false;
-        try {
-          final connected = await _engine.connect(
-            candidate.profile,
-            blockedApps: _excludedPackages.toList(growable: false),
-          );
-          if (connected) {
-            _activePoolLeaseId = lease.leaseId;
-            keepLease = true;
-            if (mounted) {
-              final summary = candidate.summary;
-              setState(() => _activePoolSummary = summary);
-              unawaited(_persistPoolSummary(summary));
+        final latency = await _engine.measurePing(
+          lease.candidate.profile,
+          automaticSelection: true,
+        );
+        probes.add(_PoolCandidateProbe(lease: lease, latencyMs: latency));
+      }
+      probes.sort((a, b) => compareMeasuredLatency(a.latencyMs, b.latencyMs));
+
+      for (final probe in probes) {
+        if (_cancelPoolSearch) break;
+        final candidate = probe.lease.candidate;
+        final connected = await _engine.connect(
+          candidate.profile,
+          blockedApps: _excludedPackages.toList(growable: false),
+        );
+        if (!connected) {
+          if (_cancelPoolSearch ||
+              !shouldRetrySubscriptionProfile(_engine.failureCategory) ||
+              !_engine.canStart || _engine.busy || _engine.connected ||
+              _engine.connecting || _engine.disconnecting) {
+            if (!_cancelPoolSearch && mounted && _engine.message != null) {
+              _showMessage(_engine.message!);
             }
-            return;
+            break;
           }
-        } finally {
-          if (!keepLease) await _exclusivePool.releaseLease(lease.leaseId);
+          continue;
         }
-        if (_cancelPoolSearch ||
-            !shouldRetrySubscriptionProfile(_engine.failureCategory) ||
-            !_engine.canStart || _engine.busy || _engine.connected ||
-            _engine.connecting || _engine.disconnecting) {
-          if (!_cancelPoolSearch && mounted && _engine.message != null) {
-            _showMessage(_engine.message!);
+
+        // A native CONNECTED state alone can still leave apps without usable
+        // egress. Verify the actual active route and prefer a different sampled
+        // profile if the connected path returns no health-check result.
+        final activeLatency = await _engine.measurePing(candidate.profile);
+        if (_cancelPoolSearch) break;
+        if (activeLatency == null) {
+          bestNativeOnlyFallback ??= probe;
+          final stopped = await _engine.disconnect();
+          if (!stopped) {
+            // Preserve a tunnel Android has not confirmed it can stop; never
+            // start a second profile on top of a possibly-live TUN.
+            if (_engine.connected && mounted) {
+              retainedLeaseId = probe.lease.leaseId;
+              _activePoolLeaseId = probe.lease.leaseId;
+              _activePoolProfile = candidate.profile;
+              setState(() {
+                _activePoolSummary = candidate.summary;
+                _activePoolPingChecked = true;
+              });
+              unawaited(_persistPoolSummary(candidate.summary));
+            } else if (mounted && _engine.message != null) {
+              _showMessage(_engine.message!);
+            }
+            break;
+          }
+          continue;
+        }
+
+        retainedLeaseId = probe.lease.leaseId;
+        _activePoolLeaseId = probe.lease.leaseId;
+        _activePoolProfile = candidate.profile;
+        if (mounted) {
+          setState(() {
+            _activePoolSummary = candidate.summary;
+            _activePoolPingChecked = true;
+          });
+          unawaited(_persistPoolSummary(candidate.summary));
+        }
+        return;
+      }
+
+      // If none of the connected candidates produced a ping response, keep one
+      // best-ranked native tunnel as a clearly unverified fallback rather than
+      // falsely claiming the sampled pool was usable or leaving no route up.
+      if (retainedLeaseId == null && bestNativeOnlyFallback != null &&
+          !_cancelPoolSearch && _engine.canStart) {
+        final fallback = bestNativeOnlyFallback;
+        final candidate = fallback.lease.candidate;
+        final connected = await _engine.connect(
+          candidate.profile,
+          blockedApps: _excludedPackages.toList(growable: false),
+        );
+        if (connected) {
+          retainedLeaseId = fallback.lease.leaseId;
+          _activePoolLeaseId = fallback.lease.leaseId;
+          _activePoolProfile = candidate.profile;
+          if (mounted) {
+            setState(() {
+              _activePoolSummary = candidate.summary;
+              _activePoolPingChecked = true;
+            });
+            unawaited(_persistPoolSummary(candidate.summary));
           }
           return;
         }
       }
-      if (!_cancelPoolSearch && mounted) {
+      if (retainedLeaseId == null && !_cancelPoolSearch && mounted) {
         _showMessage('Could not connect to an available server. Please try again later.');
       }
     } on FormatException catch (error) {
@@ -716,6 +802,11 @@ class _VpnShellState extends State<VpnShell> {
         _showMessage('Could not reach the secure server pool. Check your internet and try again.');
       }
     } finally {
+      await Future.wait(
+        probes
+            .where((probe) => probe.lease.leaseId != retainedLeaseId)
+            .map((probe) => _exclusivePool.releaseLease(probe.lease.leaseId)),
+      );
       if (mounted) setState(() => _poolSearching = false);
     }
   }
@@ -728,9 +819,13 @@ class _VpnShellState extends State<VpnShell> {
   }
 
   Future<void> _measurePing() async {
-    if (_subscriptionBusy) return;
-    final profile = _selectedIndex == null ? null : _profiles[_selectedIndex!];
-    if (profile == null) return;
+    if (_subscriptionBusy || _engine.pingBusy) return;
+    final profile = _activePoolSummary != null && _engine.connected
+        ? _activePoolProfile
+        : _selectedIndex == null
+            ? null
+            : _profiles[_selectedIndex!];
+    if (profile == null && !_engine.connected) return;
     final result = await _engine.measurePing(profile);
     if (!mounted) return;
     if (result != null) {
@@ -1240,6 +1335,7 @@ class _VpnShellState extends State<VpnShell> {
       _HomePage(
         profile: selected,
         poolSummary: _activePoolSummary,
+        poolPingChecked: _activePoolPingChecked,
         poolSearching: _poolSearching,
         onUseAutomaticPool: _useAutomaticPool,
         engine: _engine,
@@ -1353,6 +1449,7 @@ class _HomePage extends StatelessWidget {
   const _HomePage({
     required this.profile,
     required this.poolSummary,
+    required this.poolPingChecked,
     required this.poolSearching,
     required this.onUseAutomaticPool,
     required this.engine,
@@ -1366,6 +1463,7 @@ class _HomePage extends StatelessWidget {
 
   final VpnProfile? profile;
   final PoolConnectionSummary? poolSummary;
+  final bool poolPingChecked;
   final bool poolSearching;
   final VoidCallback onUseAutomaticPool;
   final VpnEngine engine;
@@ -1554,11 +1652,17 @@ class _HomePage extends StatelessWidget {
               const SizedBox(height: 10),
               Row(children: [
                 OutlinedButton.icon(
-                  onPressed: profile == null || subscriptionBusy || engine.busy || engine.connecting || engine.disconnecting
+                  onPressed: (profile == null && !poolConnected) || subscriptionBusy || engine.busy || engine.pingBusy || engine.connecting || engine.disconnecting
                       ? null
                       : onMeasurePing,
                   icon: const Icon(Icons.speed_rounded, size: 17),
-                  label: LocalizedText(engine.lastPingMs == null ? 'Test latency' : '${engine.lastPingMs} ms'),
+                  label: LocalizedText(
+                    engine.lastPingMs != null
+                        ? '${engine.lastPingMs} ms'
+                        : poolConnected && poolPingChecked
+                            ? 'No ping response'
+                            : 'Test latency',
+                  ),
                 ),
               ]),
               const SizedBox(height: 8),
