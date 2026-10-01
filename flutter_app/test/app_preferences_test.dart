@@ -12,9 +12,17 @@ void main() {
 
   test('appearance defaults are safe and stable', () async {
     final actual = await AppAppearancePreferences().read();
-    expect(actual.darkMode, isFalse);
+    expect(actual.darkMode, isTrue);
     expect(actual.reducedMotion, isFalse);
     expect(actual.showDestination, isTrue);
+  });
+
+  test('persists an explicit light/day mode choice', () async {
+    final repository = AppAppearancePreferences();
+
+    await repository.save(const AppearancePreferences(darkMode: false));
+
+    expect((await repository.read()).darkMode, isFalse);
   });
 
   test('persists dark mode, reduced motion, and hidden destination', () async {

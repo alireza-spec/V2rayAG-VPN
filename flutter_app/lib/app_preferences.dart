@@ -2,7 +2,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 class AppearancePreferences {
   const AppearancePreferences({
-    this.darkMode = false,
+    this.darkMode = true,
     this.reducedMotion = false,
     this.showDestination = true,
   });
@@ -23,7 +23,7 @@ class AppAppearancePreferences {
     try {
       final prefs = await SharedPreferences.getInstance();
       return AppearancePreferences(
-        darkMode: prefs.getBool(_darkKey) ?? false,
+        darkMode: prefs.getBool(_darkKey) ?? true,
         reducedMotion: prefs.getBool(_motionKey) ?? false,
         showDestination: prefs.getBool(_destinationKey) ?? true,
       );

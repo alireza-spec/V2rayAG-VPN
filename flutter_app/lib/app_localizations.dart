@@ -214,6 +214,7 @@ class V2rayLocalizations {
     'Settings': 'تنظیمات',
     'Appearance settings work now; Android VPN connection is managed from Connect.': 'تنظیمات ظاهری در دسترس‌اند؛ اتصال VPN در Android از بخش اتصال مدیریت می‌شود.',
     'Dark appearance': 'نمایش تیره',
+    'Light / day mode': 'تم روشن / حالت روز',
     'Change the app theme': 'تغییر پوستهٔ برنامه',
     'Reduce animations': 'کاهش پویانمایی‌ها',
     'Reduce decorative motion': 'کاهش حرکت‌های تزئینی',

@@ -56,7 +56,7 @@ class V2rayAgApp extends StatefulWidget {
 }
 
 class _V2rayAgAppState extends State<V2rayAgApp> {
-  ThemeMode _themeMode = ThemeMode.light;
+  ThemeMode _themeMode = ThemeMode.dark;
   bool _reducedMotion = false;
   bool _showDestination = true;
   Locale _locale = const Locale('en');
@@ -307,15 +307,11 @@ class _VpnShellState extends State<VpnShell> {
           _subscriptionRepository.namespaceRotated;
       if (mounted) {
         setState(() => _savedSubscriptions = personal);
-        if (_subscriptionRepository.legacyDataUnreadable) {
-          _showMessage('Some older encrypted subscription data remains untouched but cannot be read on this device. New subscriptions can be saved separately.');
-        }
       }
-    } on Object catch (error) {
+    } on Object {
       _subscriptionRestoreFailed = true;
-      if (mounted) {
-        _showMessage('Subscription storage could not be read (${_safeStorageFailure(error)}). Existing secure data will not be overwritten.');
-      }
+      // Keep the Connect screen quiet. Storage status remains available from
+      // Servers when the user chooses to manage imported subscriptions.
     } finally {
       if (!_subscriptionsReady.isCompleted) _subscriptionsReady.complete();
     }
@@ -338,17 +334,11 @@ class _VpnShellState extends State<VpnShell> {
           ..addAll(saved.sources);
         _selectedIndex = saved.selectedIndex;
       });
-      if (_profileRepository.legacyDataUnreadable) {
-        _showMessage('Some older encrypted profile data remains untouched but cannot be read on this device. New profiles can be saved separately.');
-      }
+      // Old unreadable user records stay untouched; do not interrupt first
+      // launch with a non-actionable snackbar. Servers shows storage status.
     } on Object catch (error) {
       _profileRestoreFailed = true;
       _profileStorageErrorCode = _safeStorageFailure(error);
-      if (mounted) {
-        _showMessage(
-          'Saved profiles could not be restored ($_profileStorageErrorCode). Existing secure data will not be overwritten.',
-        );
-      }
     } finally {
       if (!_profilesReady.isCompleted) _profilesReady.complete();
     }
@@ -1575,29 +1565,6 @@ class _HomePage extends StatelessWidget {
             ],
           ),
         ),
-        const SizedBox(height: 15),
-        Container(
-          padding: const EdgeInsets.symmetric(horizontal: 15, vertical: 13),
-          decoration: BoxDecoration(
-            color: dark ? const Color(0xFF29221F) : const Color(0xFFFFF1E8),
-            border: dark ? Border.all(color: const Color(0xFF594038)) : null,
-            borderRadius: BorderRadius.circular(17),
-          ),
-          child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
-            Icon(Icons.info_outline_rounded, size: 17, color: dark ? const Color(0xFFFFB29B) : const Color(0xFFB35E49)),
-            const SizedBox(width: 9),
-            Expanded(
-              child: LocalizedText(
-                'Subscription URLs and imported server configs are saved in encrypted Android storage after a successful save and are never committed to GitHub. If secure storage fails, the app reports it rather than overwriting unreadable data. The app never reads or displays your device IP.',
-                style: TextStyle(
-                  fontSize: 11,
-                  height: 1.45,
-                  color: dark ? const Color(0xFFE6C7BC) : const Color(0xFF8A5548),
-                ),
-              ),
-            ),
-          ]),
-        ),
         const SizedBox(height: 23),
         const Center(child: LocalizedText('Source: Telegram @V2rayAG  ·  Developer: HashtagAlireza',
             textAlign: TextAlign.center, style: TextStyle(fontSize: 10, color: _muted))),
@@ -2119,7 +2086,12 @@ class _SettingsPage extends StatelessWidget {
             ),
           ),
           const Divider(height: 1, indent: 16, endIndent: 16),
-          SwitchListTile(title: const LocalizedText('Dark appearance'), subtitle: const LocalizedText('Change the app theme'), value: darkMode, onChanged: onThemeChanged),
+          SwitchListTile(
+            title: const LocalizedText('Light / day mode'),
+            subtitle: const LocalizedText('Change the app theme'),
+            value: !darkMode,
+            onChanged: (lightMode) => onThemeChanged(!lightMode),
+          ),
           const Divider(height: 1, indent: 16, endIndent: 16),
           SwitchListTile(title: const LocalizedText('Reduce animations'), subtitle: const LocalizedText('Reduce decorative motion'), value: reducedMotion, onChanged: onReducedMotionChanged),
           const Divider(height: 1, indent: 16, endIndent: 16),

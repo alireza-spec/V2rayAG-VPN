@@ -177,6 +177,8 @@ class ExclusivePoolService {
   final Uri endpoint;
 
   Future<String>? _enrollmentInFlight;
+  String? _sessionDeviceToken;
+  bool _sessionDeviceTokenAutomatic = false;
 
   Future<bool> hasDeviceAccessToken() async => (await _readDeviceToken()) != null;
 
@@ -189,45 +191,84 @@ class ExclusivePoolService {
   }
 
   Future<void> _storeDeviceToken(String token, {required bool automatic}) async {
-    await _storage.write(key: _deviceTokenKey, value: token);
-    final savedToken = (await _storage.read(key: _deviceTokenKey))?.trim().toLowerCase();
-    if (savedToken != token) {
-      throw StateError('Device access secure-storage read-back verification failed.');
+    if (automatic) {
+      // Keep a newly issued token for this process even if Android's encrypted
+      // preferences cannot be opened on this device. This lets the current
+      // connection proceed; only this replaceable access token is affected.
+      _sessionDeviceToken = token;
+      _sessionDeviceTokenAutomatic = true;
     }
-    await _storage.write(
-      key: _deviceTokenOriginKey,
-      value: automatic ? 'automatic' : 'manual',
-    );
+    try {
+      await _storage.write(key: _deviceTokenKey, value: token);
+      final savedToken = (await _storage.read(key: _deviceTokenKey))?.trim().toLowerCase();
+      if (savedToken != token) {
+        throw StateError('Device access secure-storage read-back verification failed.');
+      }
+      await _storage.write(
+        key: _deviceTokenOriginKey,
+        value: automatic ? 'automatic' : 'manual',
+      );
+      _sessionDeviceToken = token;
+      _sessionDeviceTokenAutomatic = automatic;
+    } on Object {
+      if (!automatic) {
+        _sessionDeviceToken = null;
+        _sessionDeviceTokenAutomatic = false;
+        rethrow;
+      }
+      // Do not block first-connect enrollment on an unreadable legacy key or a
+      // device Keystore issue. Never clear profile/subscription storage here.
+    }
   }
 
   Future<void> clearDeviceAccessToken() async {
-    await _storage.delete(key: _deviceTokenKey);
-    await _storage.delete(key: _deviceTokenOriginKey);
+    _sessionDeviceToken = null;
+    _sessionDeviceTokenAutomatic = false;
+    await _discardStoredDeviceToken();
+  }
+
+  Future<void> _discardStoredDeviceToken() async {
+    // This namespace holds only the revocable device access token and its
+    // origin marker; user profiles and subscriptions live elsewhere.
+    for (final key in [_deviceTokenKey, _deviceTokenOriginKey]) {
+      try {
+        await _storage.delete(key: key);
+      } on Object {
+        // A broken encrypted store must not prevent temporary auto-enrollment.
+      }
+    }
   }
 
   Future<String?> _readDeviceToken() async {
-    // Do not turn a Keystore/decryption failure into "missing"; that could
-    // overwrite a still-present, unreadable credential with a new one.
+    final sessionToken = _sessionDeviceToken;
+    if (sessionToken != null && RegExp(r'^[0-9a-f]{64}$').hasMatch(sessionToken)) {
+      return sessionToken;
+    }
     try {
       final token = (await _storage.read(key: _deviceTokenKey))?.trim().toLowerCase();
       if (token == null) return null;
       if (!RegExp(r'^[0-9a-f]{64}$').hasMatch(token)) {
-        throw const FormatException(
-          'Saved app access data is invalid; it was not replaced. Check secure storage and try again.',
-        );
+        await _discardStoredDeviceToken();
+        return null;
       }
       return token;
-    } on FormatException {
-      rethrow;
     } on Object {
-      throw const FormatException(
-        'Could not read secure app access data; it was left untouched. Check secure storage and try again.',
-      );
+      // The saved value is only a revocable access credential, not user data.
+      // Discard these two entries and enroll a fresh token; do not touch the
+      // separate profile/subscription namespace.
+      await _discardStoredDeviceToken();
+      return null;
     }
   }
 
-  Future<bool> _hasAutomaticToken() async =>
-      (await _storage.read(key: _deviceTokenOriginKey)) == 'automatic';
+  Future<bool> _hasAutomaticToken() async {
+    if (_sessionDeviceToken != null) return _sessionDeviceTokenAutomatic;
+    try {
+      return (await _storage.read(key: _deviceTokenOriginKey)) == 'automatic';
+    } on Object {
+      return false;
+    }
+  }
 
   Future<String> _ensureDeviceToken() async {
     final existing = await _readDeviceToken();
