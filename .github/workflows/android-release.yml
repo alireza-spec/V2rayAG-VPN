@@ -174,6 +174,51 @@ jobs:
           manifest.write_text(xml)
           PY
 
+      - name: Apply crisp V2rayAG Android launch splash
+        run: |
+          set -euo pipefail
+          cp android_brand/res/drawable-nodpi/v2rayag_splash.png android/app/src/main/res/drawable-nodpi/v2rayag_splash.png
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          res = Path('android/app/src/main/res')
+          launch = res / 'drawable' / 'launch_background.xml'
+          launch.parent.mkdir(parents=True, exist_ok=True)
+          launch.write_text('''<?xml version="1.0" encoding="utf-8"?>
+          <layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+              <item android:drawable="#0B100E" />
+              <item>
+                  <bitmap android:gravity="center" android:src="@drawable/v2rayag_splash" />
+              </item>
+          </layer-list>
+          ''')
+
+          styles = res / 'values-v31' / 'styles.xml'
+          if not styles.is_file():
+              raise SystemExit('Android 12 splash theme was not generated')
+          text = styles.read_text()
+          pattern = re.compile(r'(<style\s+name="LaunchTheme"[^>]*>)(.*?)(</style>)', re.S)
+          match = pattern.search(text)
+          if not match:
+              raise SystemExit('Could not find Android 12 LaunchTheme')
+          body = match.group(2)
+          for name, value in (
+              ('android:windowSplashScreenBackground', '#0B100E'),
+              ('android:windowSplashScreenAnimatedIcon', '@drawable/v2rayag_splash'),
+              ('android:windowSplashScreenIconBackgroundColor', '#0B100E'),
+          ):
+              item = re.compile(r'<item\s+name="' + re.escape(name) + r'">.*?</item>', re.S)
+              replacement = f'<item name="{name}">{value}</item>'
+              if item.search(body):
+                  body = item.sub(replacement, body, count=1)
+              else:
+                  body += chr(10) + '        ' + replacement
+          text = text[:match.start(2)] + body + text[match.end(2):]
+          styles.write_text(text)
+          print('Android 12 and legacy launch screens use the crisp V2rayAG mark.')
+          PY
+
       - name: Set a Play-compatible Android package ID for tagged releases
         env:
           ANDROID_APPLICATION_ID: ${{ vars.ANDROID_APPLICATION_ID }}

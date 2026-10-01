@@ -64,6 +64,31 @@ void main() {
       expect(candidate.unlimitedQuota, isFalse);
     });
 
+    test('surfaces the access service refusal instead of a misleading generic error', () {
+      expect(
+        () => ExclusivePoolService.parseEnrollmentToken({
+          'success': false,
+          'error': 'Too many new app setups from this network today.',
+        }),
+        throwsA(isA<FormatException>().having(
+          (error) => error.message,
+          'message',
+          contains('Too many new app setups'),
+        )),
+      );
+    });
+
+    test('identifies malformed enrollment responses clearly', () {
+      expect(
+        () => ExclusivePoolService.parseEnrollmentToken({'success': false}),
+        throwsA(isA<FormatException>().having(
+          (error) => error.message,
+          'message',
+          contains('rejected setup'),
+        )),
+      );
+    });
+
     test('rejects invalid device access keys before secure storage writes', () async {
       final service = ExclusivePoolService();
       await expectLater(

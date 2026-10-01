@@ -298,11 +298,17 @@ class ExclusivePoolService {
       request.write(jsonEncode({'platform': Platform.isAndroid ? 'android' : 'mobile'}));
       final response = await request.close().timeout(const Duration(seconds: 15));
       final bytes = await _readResponse(response);
-      final decoded = _decodeJson(bytes);
+      Object? decoded;
+      try {
+        decoded = _decodeJson(bytes);
+      } on FormatException {
+        throw FormatException(
+          'Automatic access server returned an unreadable response (HTTP ${response.statusCode}).',
+        );
+      }
       if (response.statusCode != HttpStatus.ok) {
-        final message = decoded is Map<String, dynamic> && decoded['error'] is String
-            ? decoded['error'] as String
-            : 'Automatic access could not be initialized. Try again shortly.';
+        final message = _safeServerError(decoded) ??
+            'Automatic access setup was rejected (HTTP ${response.statusCode}).';
         throw FormatException(message);
       }
       final token = parseEnrollmentToken(decoded);
@@ -324,8 +330,13 @@ class ExclusivePoolService {
   }
 
   static String parseEnrollmentToken(Object? value) {
-    if (value is! Map<String, dynamic> || value['success'] != true) {
-      throw const FormatException('Automatic access could not be initialized. Try again shortly.');
+    if (value is! Map<String, dynamic>) {
+      throw const FormatException('Automatic access server returned an unreadable response.');
+    }
+    if (value['success'] != true) {
+      final message = _safeServerError(value);
+      throw FormatException(message ??
+          'Automatic access server rejected setup without a reason.');
     }
     final token = value['token'];
     if (token is! String || !RegExp(r'^[0-9a-f]{64}$').hasMatch(token)) {
@@ -456,6 +467,15 @@ class ExclusivePoolService {
     } on Object {
       throw const FormatException('The server pool returned an invalid profile.');
     }
+  }
+
+  static String? _safeServerError(Object? value) {
+    if (value is! Map<String, dynamic>) return null;
+    final raw = value['error'];
+    if (raw is! String) return null;
+    final message = raw.replaceAll(RegExp(r'[\x00-\x1F\x7F]'), ' ').trim();
+    if (message.isEmpty) return null;
+    return message.length <= 180 ? message : '${message.substring(0, 177)}…';
   }
 
   static Object? _decodeJson(List<int> bytes) =>
