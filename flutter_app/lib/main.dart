@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -7,6 +8,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import 'app_localizations.dart';
 import 'app_preferences.dart';
+import 'exclusive_pool_service.dart';
 import 'language_preferences.dart';
 import 'subscription_service.dart';
 import 'vpn_engine.dart';
@@ -220,6 +222,7 @@ class _VpnShellState extends State<VpnShell> {
   // Parallel to _profiles: saved-subscription ID, or null for pasted links.
   final List<String?> _profileSources = [];
   final VpnEngine _engine = VpnEngine();
+  final ExclusivePoolService _exclusivePool = ExclusivePoolService();
   final SubscriptionRepository _subscriptionRepository = SubscriptionRepository();
   final ProfileRepository _profileRepository = ProfileRepository();
   final Completer<void> _subscriptionsReady = Completer<void>();
@@ -235,6 +238,14 @@ class _VpnShellState extends State<VpnShell> {
   List<SavedSubscription> _savedSubscriptions = [];
   bool _subscriptionBusy = false;
   int? _selectedIndex;
+  bool _useManualProfile = false;
+  bool _connectionModeChangedByUser = false;
+  bool _poolSearching = false;
+  bool _cancelPoolSearch = false;
+  bool _poolSummaryRestored = false;
+  PoolConnectionSummary? _activePoolSummary;
+  String? _activePoolLeaseId;
+  static const _activePoolSummaryKey = 'active_pool_summary_v1';
   final Map<int, int> _profilePings = {};
   final Map<int, String> _profilePingFailures = {};
   final Set<int> _failedPings = {};
@@ -247,6 +258,7 @@ class _VpnShellState extends State<VpnShell> {
   static const MethodChannel _appPickerChannel =
       MethodChannel('v2rayag/app_picker');
   static const _excludedPackagesKey = 'excluded_packages_v1';
+  static const _manualProfileModeKey = 'manual_profile_mode_v1';
 
   // Remove a legacy device-only Exclusive entry during migration. The app no
   // longer accepts or exposes centrally managed credentials locally.
@@ -260,6 +272,8 @@ class _VpnShellState extends State<VpnShell> {
     _restoreSubscriptions();
     _restoreProfiles();
     _restoreExcludedPackages();
+    _restorePoolSummary();
+    _restoreConnectionMode();
   }
 
   String _safeStorageFailure(Object error) {
@@ -395,6 +409,69 @@ class _VpnShellState extends State<VpnShell> {
     );
   }
 
+  Future<void> _restorePoolSummary() async {
+    try {
+      final preferences = await SharedPreferences.getInstance();
+      final raw = preferences.getString(_activePoolSummaryKey);
+      if (raw != null) {
+        final decoded = jsonDecode(raw);
+        if (decoded is Map<String, dynamic>) {
+          final summary = PoolConnectionSummary.fromJson(decoded);
+          if (mounted && (!_engine.initialized || _engine.connected || _engine.connecting)) {
+            setState(() => _activePoolSummary = summary);
+          } else if (_engine.initialized) {
+            await preferences.remove(_activePoolSummaryKey);
+          }
+        }
+      }
+    } on Object {
+      // This summary contains no secret configuration; ignore corrupt UI metadata.
+    } finally {
+      _poolSummaryRestored = true;
+      if (mounted) setState(() {});
+    }
+  }
+
+  Future<void> _persistPoolSummary(PoolConnectionSummary? summary) async {
+    try {
+      final preferences = await SharedPreferences.getInstance();
+      if (summary == null) {
+        await preferences.remove(_activePoolSummaryKey);
+      } else {
+        await preferences.setString(_activePoolSummaryKey, jsonEncode(summary.toJson()));
+      }
+    } on Object {
+      // Session recovery still works through native state even if labels cannot persist.
+    }
+  }
+
+  Future<void> _releaseActivePoolLease() async {
+    final leaseId = _activePoolLeaseId;
+    _activePoolLeaseId = null;
+    if (leaseId != null) await _exclusivePool.releaseLease(leaseId);
+  }
+
+  Future<void> _restoreConnectionMode() async {
+    try {
+      final preferences = await SharedPreferences.getInstance();
+      final manual = preferences.getBool(_manualProfileModeKey) ?? false;
+      if (mounted && !_connectionModeChangedByUser) {
+        setState(() => _useManualProfile = manual);
+      }
+    } on Object {
+      // Automatic pool mode is the safe default when preferences are unavailable.
+    }
+  }
+
+  Future<void> _saveConnectionMode(bool manual) async {
+    try {
+      final preferences = await SharedPreferences.getInstance();
+      await preferences.setBool(_manualProfileModeKey, manual);
+    } on Object {
+      // Keep the current session usable even if this preference cannot be saved.
+    }
+  }
+
   Future<void> _restoreExcludedPackages() async {
     try {
       final preferences = await SharedPreferences.getInstance();
@@ -522,6 +599,13 @@ class _VpnShellState extends State<VpnShell> {
   }
 
   void _onEngineChanged() {
+    if (_poolSummaryRestored && _activePoolSummary != null &&
+        _engine.initialized && !_engine.connected && !_engine.connecting &&
+        !_engine.disconnecting && !_poolSearching) {
+      _activePoolSummary = null;
+      unawaited(_persistPoolSummary(null));
+      unawaited(_releaseActivePoolLease());
+    }
     if (mounted) setState(() {});
   }
 
@@ -529,6 +613,7 @@ class _VpnShellState extends State<VpnShell> {
   void dispose() {
     _engine.removeListener(_onEngineChanged);
     _engine.dispose();
+    _exclusivePool.dispose();
     super.dispose();
   }
 
@@ -542,20 +627,114 @@ class _VpnShellState extends State<VpnShell> {
       return;
     }
     final isActive = _engine.connected || _engine.connecting || _engine.disconnecting;
-    final profile = _selectedIndex == null ? null : _profiles[_selectedIndex!];
-    if (!isActive && profile == null) {
-      _showMessage('Import a server link first.');
+    if (isActive || _poolSearching) {
+      _cancelPoolSearch = true;
+      if (isActive) await _engine.disconnect();
+      await _releaseActivePoolLease();
+      if (mounted && !_engine.connected) {
+        setState(() => _activePoolSummary = null);
+        unawaited(_persistPoolSummary(null));
+      }
       return;
     }
-    if (isActive) {
-      await _engine.disconnect();
-    } else {
+
+    final profile = _useManualProfile && _selectedIndex != null &&
+            _selectedIndex! < _profiles.length
+        ? _profiles[_selectedIndex!]
+        : null;
+    if (profile != null) {
+      await _releaseActivePoolLease();
+      setState(() => _activePoolSummary = null);
+      unawaited(_persistPoolSummary(null));
       await _engine.connect(
-        profile!,
+        profile,
         blockedApps: _excludedPackages.toList(growable: false),
       );
+      if (mounted && _engine.message != null) _showMessage(_engine.message!);
+      return;
     }
-    if (mounted && _engine.message != null) _showMessage(_engine.message!);
+    if (_useManualProfile) {
+      _showMessage('Select a personal server or switch to automatic pool mode.');
+      return;
+    }
+    await _connectAutomatically();
+  }
+
+  Future<void> _connectAutomatically() async {
+    if (!_engine.canStart) {
+      _showMessage('The VPN engine is not ready yet. Try again in a moment.');
+      return;
+    }
+    const maxAttempts = 8;
+    final triedIds = <String>{};
+    var attempts = 0;
+    setState(() {
+      _poolSearching = true;
+      _cancelPoolSearch = false;
+      _activePoolSummary = null;
+    });
+    unawaited(_persistPoolSummary(null));
+    try {
+      while (attempts < maxAttempts && !_cancelPoolSearch) {
+        final lease = await _exclusivePool.acquireLease(excludeIds: triedIds);
+        final candidate = lease.candidate;
+        if (_cancelPoolSearch) {
+          await _exclusivePool.releaseLease(lease.leaseId);
+          break;
+        }
+        if (!triedIds.add(candidate.id)) {
+          await _exclusivePool.releaseLease(lease.leaseId);
+          break;
+        }
+        attempts++;
+        var keepLease = false;
+        try {
+          final connected = await _engine.connect(
+            candidate.profile,
+            blockedApps: _excludedPackages.toList(growable: false),
+          );
+          if (connected) {
+            _activePoolLeaseId = lease.leaseId;
+            keepLease = true;
+            if (mounted) {
+              final summary = candidate.summary;
+              setState(() => _activePoolSummary = summary);
+              unawaited(_persistPoolSummary(summary));
+            }
+            return;
+          }
+        } finally {
+          if (!keepLease) await _exclusivePool.releaseLease(lease.leaseId);
+        }
+        if (_cancelPoolSearch ||
+            !shouldRetrySubscriptionProfile(_engine.failureCategory) ||
+            !_engine.canStart || _engine.busy || _engine.connected ||
+            _engine.connecting || _engine.disconnecting) {
+          if (!_cancelPoolSearch && mounted && _engine.message != null) {
+            _showMessage(_engine.message!);
+          }
+          return;
+        }
+      }
+      if (!_cancelPoolSearch && mounted) {
+        _showMessage('Could not connect to an available server. Please try again later.');
+      }
+    } on FormatException catch (error) {
+      if (!_cancelPoolSearch && mounted) _showMessage(error.message);
+    } on Object {
+      if (!_cancelPoolSearch && mounted) {
+        _showMessage('Could not reach the secure server pool. Check your internet and try again.');
+      }
+    } finally {
+      if (mounted) setState(() => _poolSearching = false);
+    }
+  }
+
+  void _useAutomaticPool() {
+    if (_engine.connected || _engine.connecting || _engine.disconnecting) return;
+    _connectionModeChangedByUser = true;
+    setState(() => _useManualProfile = false);
+    unawaited(_saveConnectionMode(false));
   }
 
   Future<void> _measurePing() async {
@@ -725,12 +904,17 @@ class _VpnShellState extends State<VpnShell> {
   }
 
   void _selectProfile(int index) {
-    if (_subscriptionBusy || !_profilesReady.isCompleted) return;
+    if (_subscriptionBusy || _poolSearching || !_profilesReady.isCompleted) return;
     if (_engine.connected || _engine.connecting || _engine.disconnecting) {
       _showMessage('Disconnect before changing the active server.');
       return;
     }
-    setState(() => _selectedIndex = index);
+    _connectionModeChangedByUser = true;
+    setState(() {
+      _selectedIndex = index;
+      _useManualProfile = true;
+    });
+    unawaited(_saveConnectionMode(true));
     unawaited(_persistProfiles().then<void>((_) {}));
   }
 
@@ -1026,11 +1210,12 @@ class _VpnShellState extends State<VpnShell> {
   }
 
   void _removeProfile(int index) {
-    if (_subscriptionBusy) return;
+    if (_subscriptionBusy || _poolSearching) return;
     if ((_engine.connected || _engine.connecting || _engine.disconnecting) && index == _selectedIndex) {
       _showMessage('Disconnect before removing the active server.');
       return;
     }
+    final removingManualSelection = _useManualProfile && _selectedIndex == index;
     setState(() {
       _profiles.removeAt(index);
       if (index < _profileSources.length) _profileSources.removeAt(index);
@@ -1040,21 +1225,33 @@ class _VpnShellState extends State<VpnShell> {
       _probingProfiles.clear();
       if (_profiles.isEmpty) {
         _selectedIndex = null;
+        _useManualProfile = false;
       } else if (_selectedIndex == index) {
         _selectedIndex = 0;
+        _useManualProfile = false;
       } else if (_selectedIndex != null && _selectedIndex! > index) {
         _selectedIndex = _selectedIndex! - 1;
       }
     });
+    if (removingManualSelection) {
+      _connectionModeChangedByUser = true;
+      unawaited(_saveConnectionMode(false));
+    }
     unawaited(_persistProfiles().then<void>((_) {}));
   }
 
   @override
   Widget build(BuildContext context) {
-    final selected = _selectedIndex == null ? null : _profiles[_selectedIndex!];
+    final selected = _useManualProfile && _selectedIndex != null &&
+            _selectedIndex! < _profiles.length
+        ? _profiles[_selectedIndex!]
+        : null;
     final pages = <Widget>[
       _HomePage(
         profile: selected,
+        poolSummary: _activePoolSummary,
+        poolSearching: _poolSearching,
+        onUseAutomaticPool: _useAutomaticPool,
         engine: _engine,
         showDestination: widget.showDestination,
         reducedMotion: widget.reducedMotion,
@@ -1068,7 +1265,7 @@ class _VpnShellState extends State<VpnShell> {
         profileSources: _profileSources,
         selectedIndex: _selectedIndex,
         showDestination: widget.showDestination,
-        connected: _engine.connected || _engine.connecting || _engine.disconnecting,
+        connected: _engine.connected || _engine.connecting || _engine.disconnecting || _poolSearching,
         onImport: _importProfile,
         onSelect: _selectProfile,
         onRemove: _removeProfile,
@@ -1147,6 +1344,9 @@ class _VpnShellState extends State<VpnShell> {
 class _HomePage extends StatelessWidget {
   const _HomePage({
     required this.profile,
+    required this.poolSummary,
+    required this.poolSearching,
+    required this.onUseAutomaticPool,
     required this.engine,
     required this.showDestination,
     required this.reducedMotion,
@@ -1157,6 +1357,9 @@ class _HomePage extends StatelessWidget {
   });
 
   final VpnProfile? profile;
+  final PoolConnectionSummary? poolSummary;
+  final bool poolSearching;
+  final VoidCallback onUseAutomaticPool;
   final VpnEngine engine;
   final bool showDestination;
   final bool reducedMotion;
@@ -1169,7 +1372,28 @@ class _HomePage extends StatelessWidget {
   Widget build(BuildContext context) {
     final dark = Theme.of(context).brightness == Brightness.dark;
     final card = dark ? const Color(0xFF192321) : Colors.white;
-    final activeOrPending = engine.connected || engine.connecting || engine.disconnecting;
+    final activeOrPending = engine.connected || engine.connecting || engine.disconnecting || poolSearching;
+    final candidate = poolSummary;
+    final poolConnected = candidate != null && engine.connected;
+    final poolRouteLabel = poolConnected
+        ? '${candidate!.subscriptionName} · ${candidate!.configurationName}'
+        : null;
+    final expiry = candidate?.expiresAt;
+    final expiryDate = expiry == null
+        ? null
+        : DateTime.fromMillisecondsSinceEpoch(expiry * 1000).toLocal();
+    final expiryDateLabel = expiryDate == null
+        ? null
+        : '${expiryDate.year.toString().padLeft(4, '0')}-${expiryDate.month.toString().padLeft(2, '0')}-${expiryDate.day.toString().padLeft(2, '0')}';
+    final expiryDays = candidate?.daysUntilExpiry;
+    final remainingQuota = candidate?.remainingBytes;
+    final quotaLabel = candidate == null || !candidate.quotaKnown
+        ? context.tr('Unknown')
+        : candidate.unlimitedQuota
+            ? context.tr('Unlimited')
+            : remainingQuota == null || candidate.totalBytes == null
+                ? context.tr('Unknown')
+                : '${formatByteCount(remainingQuota)} / ${formatByteCount(candidate.totalBytes!)}';
     return ListView(
       padding: const EdgeInsets.fromLTRB(20, 16, 20, 30),
       children: [
@@ -1187,11 +1411,11 @@ class _HomePage extends StatelessWidget {
             reducedMotion: reducedMotion,
             dark: dark,
             connected: engine.connected,
-            connecting: engine.connecting,
+            connecting: engine.connecting || poolSearching,
             disconnecting: engine.disconnecting,
-            failed: engine.message != null && !engine.connected && !engine.connecting,
+            failed: engine.message != null && !engine.connected && !engine.connecting && !poolSearching,
             enabled: canToggleVpnAction(
-              hasProfile: profile != null,
+              hasProfile: true,
               activeOrPending: activeOrPending,
               subscriptionBusy: subscriptionBusy,
               engineBusy: engine.busy,
@@ -1204,23 +1428,27 @@ class _HomePage extends StatelessWidget {
         Center(
           child: Column(
             children: [
-              LocalizedText(engine.stateLabel, style: TextStyle(fontSize: 12, letterSpacing: 2.1, fontWeight: FontWeight.w800, color: engine.connected ? const Color(0xFF67DDB7) : (dark ? const Color(0xFFE0EAE6) : _ink))),
+              LocalizedText(poolSearching ? 'CONNECTING' : engine.stateLabel, style: TextStyle(fontSize: 12, letterSpacing: 2.1, fontWeight: FontWeight.w800, color: engine.connected ? const Color(0xFF67DDB7) : (dark ? const Color(0xFFE0EAE6) : _ink))),
               const SizedBox(height: 5),
               LocalizedText(
-                profile == null
-                    ? activeOrPending
-                        ? 'VPN service is active, but no saved server is available. Tap the shield to disconnect.'
-                        : 'Import a server before connecting'
-                    : engine.connected
-                        ? 'VPN service is connected. Test latency to verify network access.'
-                        : engine.message ??
-                            (engine.connecting
-                                ? 'Waiting for the Android tunnel status…'
-                                : engine.disconnecting
-                                    ? 'Waiting for Android to confirm disconnect…'
-                                    : engine.initialized
-                                        ? 'Tap to request Android VPN permission'
-                                        : 'Preparing Android VPN engine…'),
+                poolSearching
+                    ? 'Connecting to a suitable server…'
+                    : profile == null
+                        ? poolSummary != null && engine.connected
+                            ? 'VPN service is connected through the automatic pool.'
+                            : activeOrPending
+                                ? 'VPN service is active. Tap the shield to disconnect.'
+                                : engine.message ?? 'Tap to connect automatically'
+                        : engine.connected
+                            ? 'VPN service is connected. Test latency to verify network access.'
+                            : engine.message ??
+                                (engine.connecting
+                                    ? 'Waiting for the Android tunnel status…'
+                                    : engine.disconnecting
+                                        ? 'Waiting for Android to confirm disconnect…'
+                                        : engine.initialized
+                                            ? 'Tap to request Android VPN permission'
+                                            : 'Preparing Android VPN engine…'),
                 textAlign: TextAlign.center,
                 style: const TextStyle(fontSize: 12, color: _muted),
               ),
@@ -1229,6 +1457,11 @@ class _HomePage extends StatelessWidget {
                   onPressed: onShowDiagnostics,
                   icon: const Icon(Icons.bug_report_outlined, size: 17),
                   label: const LocalizedText('Review connection diagnostics'),
+                ),
+              if (profile != null && !activeOrPending)
+                TextButton(
+                  onPressed: onUseAutomaticPool,
+                  child: const LocalizedText('Use automatic server pool'),
                 ),
             ],
           ),
@@ -1248,20 +1481,44 @@ class _HomePage extends StatelessWidget {
               Row(children: [
                 const Icon(Icons.route_rounded, size: 18, color: Color(0xFF31896F)),
                 const SizedBox(width: 8),
-                const Expanded(child: LocalizedText('DESTINATION', style: TextStyle(fontSize: 10, letterSpacing: 1.4, fontWeight: FontWeight.w800, color: _muted))),
-                Text(profile?.protocol ?? context.tr('NO SERVER'), textDirection: TextDirection.ltr, style: const TextStyle(fontSize: 10, fontWeight: FontWeight.w800, color: _muted)),
+                Expanded(child: LocalizedText(poolConnected ? 'SECURE ROUTE' : 'DESTINATION', style: const TextStyle(fontSize: 10, letterSpacing: 1.4, fontWeight: FontWeight.w800, color: _muted))),
+                Text(poolConnected ? context.tr('AUTOMATIC') : (profile?.protocol ?? context.tr('NO SERVER')), textDirection: TextDirection.ltr, style: const TextStyle(fontSize: 10, fontWeight: FontWeight.w800, color: _muted)),
               ]),
               const SizedBox(height: 13),
               Directionality(
-                textDirection: showDestination && profile != null ? TextDirection.ltr : Directionality.of(context),
+                textDirection: !poolConnected && showDestination && profile != null
+                    ? TextDirection.ltr
+                    : Directionality.of(context),
                 child: Text(
-                  showDestination ? (profile?.destination ?? context.tr('Add a server link')) : context.tr('Destination hidden'),
+                  poolConnected
+                      ? poolRouteLabel!
+                      : showDestination
+                          ? (profile?.destination ?? context.tr('Add a server link'))
+                          : context.tr('Destination hidden'),
                   style: TextStyle(fontSize: 18, fontWeight: FontWeight.w800, color: dark ? Colors.white : _ink),
                 ),
               ),
               const SizedBox(height: 5),
-              LocalizedText(profile == null ? 'No client address is read or displayed.' : 'Country: not looked up',
+              LocalizedText(poolConnected
+                      ? 'Subscription route. No device IP is displayed.'
+                      : profile == null
+                          ? 'No client address is read or displayed.'
+                          : 'Country: not looked up',
                   style: const TextStyle(fontSize: 12, color: _muted)),
+              if (poolConnected) ...[
+                const SizedBox(height: 8),
+                _MetricRow(
+                  label: 'SUBSCRIPTION QUOTA REMAINING',
+                  value: quotaLabel,
+                ),
+                const SizedBox(height: 4),
+                _MetricRow(
+                  label: 'SUBSCRIPTION EXPIRY',
+                  value: expiryDateLabel == null || expiryDays == null
+                      ? context.tr('Unknown')
+                      : '${context.tr('Expires in')} $expiryDays ${context.tr(expiryDays == 1 ? 'day' : 'days')} · $expiryDateLabel',
+                ),
+              ],
               const SizedBox(height: 8),
               if (engine.connected || engine.hasSessionData) ...[
                 _MetricRow(
