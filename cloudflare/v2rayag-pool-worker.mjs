@@ -5,9 +5,7 @@ const REFRESH_BATCH = 10;
 const SUB_PREFIX = "sub:";
 const PROFILE_PREFIX = "profile:";
 const LEASE_PREFIX = "lease:";
-const RATE_PREFIX = "rate:";
 const DEVICE_PREFIX = "device:";
-const MAX_LEASES_PER_MINUTE = 12;
 const LEASE_TTL_SECONDS = 12 * 60 * 60;
 const SUPPORTED_URI = /^(?:vless|vmess|trojan|ss|shadowsocks|hysteria2|wireguard|socks|http):\/\//i;
 
@@ -56,9 +54,8 @@ async function authenticateDevice(request, env) {
   return record?.active === true ? { hash, record } : null;
 }
 async function enrollAppDevice(request, env) {
-  // Do not impose an IP/day registration cap: mobile carriers and ISPs often
-  // share public IPs across many legitimate users. Per-device lease throttling
-  // remains in place to protect the pool endpoints from bursts.
+  // Enrollment and lease requests have no application-defined per-device or
+  // shared-IP cadence cap; Cloudflare and upstream provider quotas still apply.
   await parseBody(request); // Require a small JSON POST; do not accept enrollment via navigation or GET.
   const token = randomToken();
   const hash = await sha256Hex(token);
@@ -67,15 +64,6 @@ async function enrollAppDevice(request, env) {
     createdAt:Date.now(), lastUsedAt:null,
   }));
   return json({ success:true, token });
-}
-async function allowLeaseRequest(request, env, deviceHash) {
-  const ip = request.headers.get("cf-connecting-ip") || "unknown";
-  const bucket = Math.floor(Date.now() / 60000);
-  const key = RATE_PREFIX + await digest(`${deviceHash}\n${ip}\n${bucket}`);
-  const count = Number(await env.POOL.get(key) || 0);
-  if (!Number.isFinite(count) || count >= MAX_LEASES_PER_MINUTE) return false;
-  await env.POOL.put(key, String(count + 1), { expirationTtl: 120 });
-  return true;
 }
 function constantTimeEqual(a, b) { if (a.length !== b.length) return false; let diff = 0; for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i); return diff === 0; }
 function adminOK(request, env) { const key = request.headers.get("authorization") || ""; const expected = env.ADMIN_KEY ? `Bearer ${env.ADMIN_KEY}` : ""; return Boolean(expected && constantTimeEqual(key, expected)); }
@@ -301,13 +289,10 @@ async function adminApi(request, env, path) {
 async function acquirePoolLease(request, env) {
   const device = await authenticateDevice(request, env);
   if (!device) return json({ success:false, error:"This app installation is not authorized. Contact support if the problem persists." }, 401);
-  if (!(await allowLeaseRequest(request, env, device.hash))) {
-    return json({ success:false, error:"Connection attempts are temporarily limited. Please wait a minute and try again." }, 429);
-  }
   await env.POOL.put(DEVICE_PREFIX + device.hash, JSON.stringify({ ...device.record, lastUsedAt:Date.now() }));
   const body = await parseBody(request);
   const excluded = new Set(Array.isArray(body.exclude)
-    ? body.exclude.filter(id => typeof id === "string" && /^[0-9a-f]{24}$/.test(id)).slice(0, 100)
+    ? body.exclude.filter(id => typeof id === "string" && /^[0-9a-f]{24}$/.test(id))
     : []);
   const subs = await listSubscriptions(env);
   if (!subs.length) return json({ success:false, error:"No available server is configured yet." }, 503);

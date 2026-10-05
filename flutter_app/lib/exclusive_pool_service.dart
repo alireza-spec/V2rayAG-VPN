@@ -143,6 +143,30 @@ class _PoolAuthorizationException implements Exception {
   final String message;
 }
 
+/// The Worker has no additional usable profiles to lease for this search.
+class PoolCandidatesUnavailableException implements Exception {
+  const PoolCandidatesUnavailableException(this.message);
+  final String message;
+
+  @override
+  String toString() => 'PoolCandidatesUnavailableException';
+}
+
+/// A leased node that the client parser cannot use. Carries only opaque IDs so
+/// the lease can be released and the pool can provide another candidate.
+class PoolCandidateRejectedException implements Exception {
+  const PoolCandidateRejectedException({
+    required this.leaseId,
+    required this.candidateId,
+  });
+
+  final String leaseId;
+  final String candidateId;
+
+  @override
+  String toString() => 'PoolCandidateRejectedException';
+}
+
 class ExclusivePoolService {
   ExclusivePoolService({
     HttpClient? client,
@@ -371,10 +395,17 @@ class ExclusivePoolService {
         if (response.statusCode == HttpStatus.unauthorized) {
           throw _PoolAuthorizationException(message);
         }
+        if (response.statusCode == HttpStatus.serviceUnavailable) {
+          throw PoolCandidatesUnavailableException(message);
+        }
         throw FormatException(message);
       }
       return parseLease(decoded);
     } on _PoolAuthorizationException {
+      rethrow;
+    } on PoolCandidatesUnavailableException {
+      rethrow;
+    } on PoolCandidateRejectedException {
       rethrow;
     } on FormatException {
       rethrow;
@@ -386,22 +417,32 @@ class ExclusivePoolService {
   }
 
   Future<ExclusivePoolLease> acquireLease({Set<String> excludeIds = const {}}) async {
-    final excluded = excludeIds
-        .where((id) => RegExp(r'^[0-9a-f]{24}$').hasMatch(id))
-        .take(100)
-        .toList(growable: false);
-    final deviceToken = await _ensureDeviceToken();
-    try {
-      return await _requestLease(excluded, deviceToken);
-    } on _PoolAuthorizationException catch (error) {
-      // Migrate a previously pasted key to automatic access if it is no longer
-      // valid. Never silently replace an already automatic/revoked token.
-      if (await _hasAutomaticToken()) {
-        throw FormatException(error.message);
+    final excluded = <String>{
+      ...excludeIds.where((id) => RegExp(r'^[0-9a-f]{24}$').hasMatch(id)),
+    };
+    var deviceToken = await _ensureDeviceToken();
+    while (true) {
+      try {
+        return await _requestLease(
+          excluded.toList(growable: false),
+          deviceToken,
+        );
+      } on PoolCandidateRejectedException catch (error) {
+        await releaseLease(error.leaseId);
+        if (!excluded.add(error.candidateId)) {
+          throw const FormatException(
+            'The server pool repeated an unsupported profile. Try again shortly.',
+          );
+        }
+      } on _PoolAuthorizationException catch (error) {
+        // Migrate a previously pasted key if it is no longer valid. Never
+        // silently replace an already automatic/revoked token.
+        if (await _hasAutomaticToken()) {
+          throw FormatException(error.message);
+        }
+        await clearDeviceAccessToken();
+        deviceToken = await _enrollDevice();
       }
-      await clearDeviceAccessToken();
-      final replacement = await _enrollDevice();
-      return _requestLease(excluded, replacement);
     }
   }
 
@@ -440,13 +481,15 @@ class ExclusivePoolService {
     }
     final id = entry['id'];
     final rawUri = entry['uri'];
-    if (id is! String || !RegExp(r'^[0-9a-f]{24}$').hasMatch(id) ||
-        rawUri is! String || rawUri.length > maxProfileBytes) {
+    if (id is! String || !RegExp(r'^[0-9a-f]{24}$').hasMatch(id)) {
       throw const FormatException('The server pool returned an invalid profile.');
+    }
+    if (rawUri is! String || rawUri.length > maxProfileBytes) {
+      throw PoolCandidateRejectedException(leaseId: leaseId, candidateId: id);
     }
     final uri = Uri.tryParse(rawUri.trim());
     if (uri == null || !_supportedSchemes.contains(uri.scheme.toLowerCase())) {
-      throw const FormatException('The server pool returned an unsupported profile.');
+      throw PoolCandidateRejectedException(leaseId: leaseId, candidateId: id);
     }
     try {
       final profile = VpnProfile.fromShareLink(rawUri);
@@ -464,8 +507,10 @@ class ExclusivePoolService {
           expiresAt: _optionalNonNegativeInt(entry['expiresAt']),
         ),
       );
+    } on PoolCandidateRejectedException {
+      rethrow;
     } on Object {
-      throw const FormatException('The server pool returned an invalid profile.');
+      throw PoolCandidateRejectedException(leaseId: leaseId, candidateId: id);
     }
   }
 

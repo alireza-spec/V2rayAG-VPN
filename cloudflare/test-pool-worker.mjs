@@ -56,10 +56,18 @@ try {
   const leaseId=d.leaseId;
   r = await call('/v1/pool/leases/release','POST',{leaseId},{'content-type':'application/json', authorization:'Bearer '+appToken}); assert.equal(r.status,200); assert.equal((await r.json()).released,true);
   assert.equal(await env.POOL.get('lease:'+leaseId),null);
-  r = await call('/v1/pool/leases','POST',{exclude:[d.candidate.id]},{'content-type':'application/json','cf-connecting-ip':'192.0.2.11', authorization:'Bearer '+appToken}); assert.equal(r.status,503);
-  for (let i=0;i<12;i++) { r=await call('/v1/pool/leases','POST',{exclude:[]},{'content-type':'application/json','cf-connecting-ip':'192.0.2.12', authorization:'Bearer '+appToken}); assert.equal(r.status,200); }
-  r=await call('/v1/pool/leases','POST',{exclude:[]},{'content-type':'application/json','cf-connecting-ip':'192.0.2.12', authorization:'Bearer '+appToken}); assert.equal(r.status,429);
+  const candidateId=d.candidate.id;
+  const longExcludeList=Array.from({length:150},()=> 'f'.repeat(24)); longExcludeList.push(candidateId);
+  r = await call('/v1/pool/leases','POST',{exclude:longExcludeList},{'content-type':'application/json','cf-connecting-ip':'192.0.2.11', authorization:'Bearer '+appToken}); assert.equal(r.status,503);
+  for (let i=0;i<25;i++) {
+    r=await call('/v1/pool/leases','POST',{exclude:[]},{'content-type':'application/json','cf-connecting-ip':'192.0.2.12', authorization:'Bearer '+appToken});
+    assert.equal(r.status,200,`lease attempt ${i+1} must not be rate-limited`);
+    const repeated=await r.json();
+    r=await call('/v1/pool/leases/release','POST',{leaseId:repeated.leaseId},{'content-type':'application/json',authorization:'Bearer '+appToken});
+    assert.equal(r.status,200);
+  }
+  assert.equal([...env.POOL.data.keys()].some(k=>k.startsWith('rate:')),false);
 } finally { globalThis.fetch = realFetch; }
 r = await call('/admin'); assert.equal(r.status, 200); const html=await r.text(); assert.match(html,/V2rayAG private pool/); const inline=html.match(/<script>([\s\S]*?)<\/script>/)?.[1]; assert.ok(inline); new Function(inline); assert.match(inline,/delete-all/); assert.match(inline,/statusFilter/); assert.match(inline,/markers=text.match/);
 const pasted='Sub 0001 | https://one.example/aSub 0002 | https://two.example/b'; const markers=pasted.match(/Sub\s+\d+\s*\|\s*https/gi)||[]; const parsed=(markers.length>1?pasted.split(/(?=Sub\s+\d+\s*\|\s*https)/i):pasted.split(/\r\n|[\n\r\u2028\u2029]/)).map(x=>x.trim()).filter(Boolean); assert.equal(parsed.length,2); assert.match(parsed[1],/^Sub 0002/);
-console.log('Worker admin, flattened import, unlimited app enrollment, one-profile lease throttling, release, and deletion tests passed.');
+console.log('Worker admin, flattened import, unlimited enrollment and leases, full exclusion filtering, release, and deletion tests passed.');

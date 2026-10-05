@@ -604,9 +604,8 @@ class _VpnShellState extends State<VpnShell> {
   }
 
   void _onEngineChanged() {
-    if (_poolSummaryRestored && _activePoolSummary != null &&
-        _engine.initialized && !_engine.connected && !_engine.connecting &&
-        !_engine.disconnecting && !_poolSearching) {
+    if (_poolSummaryRestored && _engine.initialized && !_engine.connected &&
+        !_engine.connecting && !_engine.disconnecting && !_poolSearching) {
       _activePoolSummary = null;
       _activePoolProfile = null;
       _activePoolPingChecked = false;
@@ -637,16 +636,26 @@ class _VpnShellState extends State<VpnShell> {
     final isActive = _engine.connected || _engine.connecting || _engine.disconnecting;
     if (isActive || _poolSearching) {
       _cancelPoolSearch = true;
-      if (isActive) await _engine.disconnect();
-      await _releaseActivePoolLease();
-      if (mounted && !_engine.connected) {
+      // Clear the previous session presentation immediately. The engine still
+      // blocks a new start until Android confirms the native tunnel is stopped.
+      if (mounted) {
         setState(() {
           _activePoolSummary = null;
           _activePoolProfile = null;
           _activePoolPingChecked = false;
           _activePoolTelegramVerified = null;
         });
-        unawaited(_persistPoolSummary(null));
+      }
+      unawaited(_persistPoolSummary(null));
+      if (isActive) {
+        final stopped = await _engine.disconnect();
+        if (!stopped) {
+          if (mounted && _engine.message != null) _showMessage(_engine.message!);
+          return;
+        }
+        await _releaseActivePoolLease();
+      } else if (!_poolSearching) {
+        await _releaseActivePoolLease();
       }
       return;
     }
@@ -683,10 +692,8 @@ class _VpnShellState extends State<VpnShell> {
       _showMessage('The VPN engine is not ready yet. Try again in a moment.');
       return;
     }
-    // The private Worker allows 12 leases per device per minute. Sample only
-    // five, leaving room for a user retry while testing a useful variety of
-    // profiles from across the active subscription pool.
-    const candidateSampleLimit = 5;
+    // Keep searching until the Worker reports exhaustion or the user cancels;
+    // there is no app-imposed per-attempt candidate ceiling.
     final triedIds = <String>{};
     final probes = <_PoolCandidateProbe>[];
     String? retainedLeaseId;
@@ -702,8 +709,15 @@ class _VpnShellState extends State<VpnShell> {
     unawaited(_persistPoolSummary(null));
     _PoolCandidateProbe? bestNativeOnlyFallback;
     try {
-      for (var i = 0; i < candidateSampleLimit && !_cancelPoolSearch; i++) {
-        final lease = await _exclusivePool.acquireLease(excludeIds: triedIds);
+      while (!_cancelPoolSearch) {
+        late final ExclusivePoolLease lease;
+        try {
+          lease = await _exclusivePool.acquireLease(excludeIds: triedIds);
+        } on PoolCandidatesUnavailableException {
+          // Normal exhaustion: use the candidates already probed rather than
+          // turning the last empty response into a failed connection attempt.
+          break;
+        }
         if (!triedIds.add(lease.candidate.id)) {
           await _exclusivePool.releaseLease(lease.leaseId);
           break;

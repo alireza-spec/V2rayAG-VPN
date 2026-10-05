@@ -205,14 +205,20 @@ class VpnEngine extends ChangeNotifier {
   }
 
   void _endSession() {
-    final clock = _sessionClock;
-    if (clock != null) {
-      clock.stop();
-      _lastSessionDuration += clock.elapsed;
-      _sessionClock = null;
-    }
+    _sessionClock?.stop();
+    _sessionClock = null;
     _sessionTicker?.cancel();
     _sessionTicker = null;
+    // A disconnected screen is a clean slate, not a snapshot of the last
+    // route. Reset all per-session counters and probe state before notifying UI.
+    _lastSessionDuration = Duration.zero;
+    _hasSessionData = false;
+    _sessionUpload = 0;
+    _sessionDownload = 0;
+    _lastNativeUpload = 0;
+    _lastNativeDownload = 0;
+    _lastPingMs = null;
+    _lastPingTarget = null;
   }
 
   void _recordTraffic(VlessStatus next) {
