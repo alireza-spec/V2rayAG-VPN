@@ -8,6 +8,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import 'app_localizations.dart';
 import 'app_preferences.dart';
+import 'cdn_fronting.dart';
 import 'exclusive_pool_service.dart';
 import 'language_preferences.dart';
 import 'subscription_service.dart';
@@ -225,6 +226,9 @@ class _VpnShellState extends State<VpnShell> {
   final ExclusivePoolService _exclusivePool = ExclusivePoolService();
   final SubscriptionRepository _subscriptionRepository = SubscriptionRepository();
   final ProfileRepository _profileRepository = ProfileRepository();
+  final CdnFrontingPreferencesRepository _cdnPreferencesRepository =
+      CdnFrontingPreferencesRepository();
+  CdnFrontingSettings _cdnFrontingSettings = const CdnFrontingSettings();
   final Completer<void> _subscriptionsReady = Completer<void>();
   final Completer<void> _profilesReady = Completer<void>();
   final Completer<void> _routingPreferencesReady = Completer<void>();
@@ -240,6 +244,7 @@ class _VpnShellState extends State<VpnShell> {
   int? _selectedIndex;
   bool _useManualProfile = false;
   bool _connectionModeChangedByUser = false;
+  bool _connectionProtocolChangedByUser = false;
   bool _poolSearching = false;
   bool _cancelPoolSearch = false;
   bool _poolSummaryRestored = false;
@@ -448,12 +453,74 @@ class _VpnShellState extends State<VpnShell> {
     try {
       final preferences = await SharedPreferences.getInstance();
       final manual = preferences.getBool(_manualProfileModeKey) ?? false;
-      if (mounted && !_connectionModeChangedByUser) {
-        setState(() => _useManualProfile = manual);
+      final protocolSettings = await _cdnPreferencesRepository.read();
+      if (mounted) {
+        setState(() {
+          if (!_connectionProtocolChangedByUser) {
+            _cdnFrontingSettings = protocolSettings;
+          }
+          if (!_connectionModeChangedByUser) {
+            // CDN Fronting is a protocol for automatic-pool candidates only.
+            // Never restore it on top of a previously selected personal profile.
+            final activeSettings = _connectionProtocolChangedByUser
+                ? _cdnFrontingSettings
+                : protocolSettings;
+            _useManualProfile = activeSettings.protocol == ConnectionProtocol.cdnFronting
+                ? false
+                : manual;
+          }
+        });
       }
     } on Object {
       // Automatic pool mode is the safe default when preferences are unavailable.
     }
+  }
+
+  Future<bool> _saveConnectionProtocol(CdnFrontingSettings next) async {
+    if (_engine.connected || _engine.connecting || _engine.disconnecting ||
+        _poolSearching || _subscriptionBusy || _engine.busy) {
+      _showMessage('Disconnect before changing connection protocol.');
+      return false;
+    }
+    _connectionProtocolChangedByUser = true;
+    try {
+      final validated = next.validated();
+      await _cdnPreferencesRepository.save(validated);
+      if (!mounted) return false;
+      setState(() {
+        _cdnFrontingSettings = validated;
+        if (validated.protocol == ConnectionProtocol.cdnFronting) {
+          _useManualProfile = false;
+        }
+        _tab = 0;
+      });
+      if (validated.protocol == ConnectionProtocol.cdnFronting) {
+        _connectionModeChangedByUser = true;
+        unawaited(_saveConnectionMode(false));
+      }
+      _showMessage('Connection protocol settings saved.');
+      return true;
+    } on FormatException catch (error) {
+      if (mounted) _showMessage(error.message);
+      return false;
+    } on Object {
+      if (mounted) {
+        final persisted = await _cdnPreferencesRepository.read();
+        setState(() => _cdnFrontingSettings = persisted);
+        _showMessage('Could not save connection protocol settings.');
+      }
+      return false;
+    }
+  }
+
+  void _deactivateCdnProtocol() {
+    if (_cdnFrontingSettings.protocol == ConnectionProtocol.auto) return;
+    final next = _cdnFrontingSettings.withProtocol(ConnectionProtocol.auto);
+    _connectionProtocolChangedByUser = true;
+    setState(() => _cdnFrontingSettings = next);
+    unawaited(_cdnPreferencesRepository.save(next).catchError((Object _) {
+      if (mounted) _showMessage('Could not save connection protocol settings.');
+    }));
   }
 
   Future<void> _saveConnectionMode(bool manual) async {
@@ -688,6 +755,11 @@ class _VpnShellState extends State<VpnShell> {
     final triedIds = <String>{};
     String? currentLeaseId;
     String? retainedLeaseId;
+    var sawCdnCompatibleCandidate = false;
+    var sawCdnIncompatibleCandidate = false;
+    final cdnOverridesActive =
+        _cdnFrontingSettings.protocol == ConnectionProtocol.cdnFronting &&
+            _cdnFrontingSettings.hasOverrides;
     _activePoolLeaseId = null;
     setState(() {
       _poolSearching = true;
@@ -720,10 +792,37 @@ class _VpnShellState extends State<VpnShell> {
         }
 
         final candidate = lease.candidate;
-        final connected = await _engine.connect(
-          candidate.profile,
-          blockedApps: _excludedPackages.toList(growable: false),
-        );
+        late final List<VpnProfile> profileAttempts;
+        try {
+          profileAttempts = buildCdnProfileAttempts(candidate.profile, _cdnFrontingSettings);
+          sawCdnCompatibleCandidate = true;
+        } on CdnProfileNotSupportedException {
+          sawCdnIncompatibleCandidate = true;
+          await _exclusivePool.releaseLease(lease.leaseId);
+          currentLeaseId = null;
+          continue;
+        } on FormatException {
+          // A malformed candidate must not strand its lease or prevent the
+          // next automatic server from being tried.
+          sawCdnIncompatibleCandidate = true;
+          await _exclusivePool.releaseLease(lease.leaseId);
+          currentLeaseId = null;
+          continue;
+        }
+        VpnProfile? attemptedProfile;
+        var connected = false;
+        for (final profileAttempt in profileAttempts) {
+          if (_cancelPoolSearch) break;
+          attemptedProfile = profileAttempt;
+          connected = await _engine.connect(
+            profileAttempt,
+            blockedApps: _excludedPackages.toList(growable: false),
+          );
+          if (connected || _cancelPoolSearch || _engine.connected ||
+              _engine.connecting || _engine.disconnecting || !_engine.canStart) {
+            break;
+          }
+        }
 
         if (_cancelPoolSearch) {
           // A cancel can arrive while Android's permission sheet or start
@@ -760,7 +859,7 @@ class _VpnShellState extends State<VpnShell> {
           retainedLeaseId = lease.leaseId;
           currentLeaseId = null;
           _activePoolLeaseId = lease.leaseId;
-          _activePoolProfile = candidate.profile;
+          _activePoolProfile = attemptedProfile ?? candidate.profile;
           if (mounted) {
             setState(() {
               _activePoolSummary = candidate.summary;
@@ -770,7 +869,7 @@ class _VpnShellState extends State<VpnShell> {
             unawaited(_persistPoolSummary(candidate.summary));
           }
           final latency = await _engine.measurePing(
-            candidate.profile,
+            attemptedProfile ?? candidate.profile,
             telegramOnly: true,
           );
           if (mounted) {
@@ -789,7 +888,7 @@ class _VpnShellState extends State<VpnShell> {
           retainedLeaseId = lease.leaseId;
           currentLeaseId = null;
           _activePoolLeaseId = lease.leaseId;
-          _activePoolProfile = candidate.profile;
+          _activePoolProfile = attemptedProfile ?? candidate.profile;
           if (mounted) {
             setState(() {
               _activePoolSummary = candidate.summary;
@@ -818,7 +917,12 @@ class _VpnShellState extends State<VpnShell> {
 
       if (retainedLeaseId == null && !_cancelPoolSearch && mounted &&
           _engine.message == null) {
-        _showMessage('Could not connect to an available server. Please try again later.');
+        if (cdnOverridesActive && sawCdnIncompatibleCandidate &&
+            !sawCdnCompatibleCandidate) {
+          _showMessage('CDN Fronting needs an automatic server using TLS WebSocket.');
+        } else {
+          _showMessage('Could not connect to an available server. Please try again later.');
+        }
       }
     } on FormatException catch (error) {
       if (!_cancelPoolSearch && mounted) _showMessage(error.message);
@@ -838,6 +942,7 @@ class _VpnShellState extends State<VpnShell> {
     if (_engine.connected || _engine.connecting || _engine.disconnecting || _poolSearching) return;
     _connectionModeChangedByUser = true;
     setState(() => _useManualProfile = false);
+    _deactivateCdnProtocol();
     unawaited(_saveConnectionMode(false));
   }
 
@@ -851,6 +956,7 @@ class _VpnShellState extends State<VpnShell> {
       _useManualProfile = true;
       if (openServers) _tab = 1;
     });
+    _deactivateCdnProtocol();
     unawaited(_saveConnectionMode(true));
     if (_profiles.isEmpty) {
       _showMessage('Import a personal server profile to use this mode.');
@@ -1061,6 +1167,7 @@ class _VpnShellState extends State<VpnShell> {
       _selectedIndex = index;
       _useManualProfile = true;
     });
+    _deactivateCdnProtocol();
     unawaited(_saveConnectionMode(true));
     unawaited(_persistProfiles().then<void>((_) {}));
   }
@@ -1462,6 +1569,15 @@ class _VpnShellState extends State<VpnShell> {
         onThemeChanged: widget.onThemeChanged,
         onEditAppRouting: _editExcludedApps,
         excludedAppsCount: _excludedPackages.length,
+        onOpenConnectionProtocol: () => setState(() => _tab = 3),
+      ),
+      _ConnectionProtocolPage(
+        key: const ValueKey('connection-protocol-page'),
+        settings: _cdnFrontingSettings,
+        locked: _engine.connected || _engine.connecting || _engine.disconnecting ||
+            _poolSearching || _subscriptionBusy || _engine.busy,
+        onSave: _saveConnectionProtocol,
+        onBack: () => setState(() => _tab = 2),
       ),
     ];
 
@@ -1524,6 +1640,18 @@ class _VpnShellState extends State<VpnShell> {
                 onTap: () {
                   Navigator.of(context).pop();
                   setState(() => _tab = 2);
+                },
+              ),
+              ListTile(
+                leading: const Icon(Icons.hub_rounded),
+                title: const LocalizedText('Connection protocol'),
+                subtitle: LocalizedText(_cdnFrontingSettings.protocol == ConnectionProtocol.auto
+                    ? 'Auto'
+                    : 'CDN Fronting'),
+                selected: _tab == 3,
+                onTap: () {
+                  Navigator.of(context).pop();
+                  setState(() => _tab = 3);
                 },
               ),
               const Divider(indent: 16, endIndent: 16),
@@ -1595,7 +1723,7 @@ class _VpnShellState extends State<VpnShell> {
         child: IndexedStack(index: _tab, children: pages),
       ),
       bottomNavigationBar: NavigationBar(
-        selectedIndex: _tab,
+        selectedIndex: _tab > 2 ? 2 : _tab,
         onDestinationSelected: (index) => setState(() => _tab = index),
         destinations: [
           NavigationDestination(icon: const Icon(Icons.radio_button_checked_rounded), label: context.tr('Connect')),
@@ -2446,6 +2574,7 @@ class _SettingsPage extends StatelessWidget {
     required this.onThemeChanged,
     required this.onEditAppRouting,
     required this.excludedAppsCount,
+    required this.onOpenConnectionProtocol,
   });
 
   final Locale locale;
@@ -2462,6 +2591,7 @@ class _SettingsPage extends StatelessWidget {
   final ValueChanged<bool> onThemeChanged;
   final VoidCallback onEditAppRouting;
   final int excludedAppsCount;
+  final VoidCallback onOpenConnectionProtocol;
 
   @override
   Widget build(BuildContext context) => ListView(padding: const EdgeInsets.fromLTRB(20, 18, 20, 28), children: [
@@ -2504,6 +2634,14 @@ class _SettingsPage extends StatelessWidget {
             onTap: onEditAppRouting,
           ),
           const Divider(height: 1, indent: 16, endIndent: 16),
+          ListTile(
+            leading: const Icon(Icons.hub_rounded),
+            title: const LocalizedText('Connection protocol'),
+            subtitle: const LocalizedText('Auto or optional CDN Fronting settings'),
+            trailing: const Icon(Icons.chevron_right_rounded),
+            onTap: onOpenConnectionProtocol,
+          ),
+          const Divider(height: 1, indent: 16, endIndent: 16),
           SwitchListTile(
             secondary: const Icon(Icons.auto_awesome_rounded),
             title: const LocalizedText('Automatic server pool'),
@@ -2539,6 +2677,234 @@ class _SettingsPage extends StatelessWidget {
         const SizedBox(height: 20),
         const ListTile(leading: _BrandMark(), title: LocalizedText('V2rayAG'), subtitle: LocalizedText('Source: Telegram @V2rayAG\nDeveloper: V2rayAG telegram channel and HashtagAlireza')),
       ]);
+}
+
+class _ConnectionProtocolPage extends StatefulWidget {
+  const _ConnectionProtocolPage({
+    required this.settings,
+    required this.locked,
+    required this.onSave,
+    required this.onBack,
+    super.key,
+  });
+
+  final CdnFrontingSettings settings;
+  final bool locked;
+  final Future<bool> Function(CdnFrontingSettings) onSave;
+  final VoidCallback onBack;
+
+  @override
+  State<_ConnectionProtocolPage> createState() => _ConnectionProtocolPageState();
+}
+
+class _ConnectionProtocolPageState extends State<_ConnectionProtocolPage> {
+  late final TextEditingController _ipsController;
+  late final TextEditingController _sniController;
+  late ConnectionProtocol _selectedProtocol;
+  bool _saving = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _selectedProtocol = widget.settings.protocol;
+    _ipsController = TextEditingController(text: widget.settings.cdnIps);
+    _sniController = TextEditingController(text: widget.settings.sniHostname);
+  }
+
+  @override
+  void didUpdateWidget(covariant _ConnectionProtocolPage oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.settings.protocol != widget.settings.protocol) {
+      _selectedProtocol = widget.settings.protocol;
+    }
+    if (oldWidget.settings.cdnIps != widget.settings.cdnIps) {
+      _ipsController.text = widget.settings.cdnIps;
+    }
+    if (oldWidget.settings.sniHostname != widget.settings.sniHostname) {
+      _sniController.text = widget.settings.sniHostname;
+    }
+  }
+
+  @override
+  void dispose() {
+    _ipsController.dispose();
+    _sniController.dispose();
+    super.dispose();
+  }
+
+  Future<void> _save(ConnectionProtocol protocol) async {
+    if (widget.locked || _saving) return;
+    setState(() => _saving = true);
+    try {
+      final settings = protocol == ConnectionProtocol.auto
+          ? CdnFrontingSettings(
+              protocol: ConnectionProtocol.auto,
+              cdnIps: widget.settings.cdnIps,
+              sniHostname: widget.settings.sniHostname,
+            )
+          : CdnFrontingSettings(
+              protocol: protocol,
+              cdnIps: _ipsController.text,
+              sniHostname: _sniController.text,
+            ).validated();
+      final saved = await widget.onSave(settings);
+      if (saved && mounted) {
+        setState(() {
+          _selectedProtocol = protocol;
+          _ipsController.text = settings.cdnIps;
+          _sniController.text = settings.sniHostname;
+        });
+      }
+    } on FormatException catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: LocalizedText(error.message)),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _saving = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) => ListView(
+        padding: const EdgeInsets.fromLTRB(20, 18, 20, 28),
+        children: [
+          Row(children: [
+            IconButton(
+              tooltip: context.tr('Back to settings'),
+              onPressed: widget.onBack,
+              icon: const Icon(Icons.arrow_back_rounded),
+            ),
+            Expanded(
+              child: LocalizedText(
+                'Connection protocol',
+                style: Theme.of(context).textTheme.headlineMedium?.copyWith(
+                      fontWeight: FontWeight.w800,
+                    ),
+              ),
+            ),
+          ]),
+          const SizedBox(height: 6),
+          const Padding(
+            padding: EdgeInsets.symmetric(horizontal: 12),
+            child: LocalizedText(
+              'Choose how automatic-pool connections should be routed. Auto is the default and leaves current connections unchanged.',
+              style: TextStyle(color: _muted, height: 1.4),
+            ),
+          ),
+          const SizedBox(height: 16),
+          Card(
+            elevation: 0,
+            color: Theme.of(context).colorScheme.surface,
+            child: Column(children: [
+              RadioListTile<ConnectionProtocol>(
+                value: ConnectionProtocol.auto,
+                groupValue: _selectedProtocol,
+                title: const LocalizedText('Auto'),
+                subtitle: const LocalizedText(
+                  'Use the existing automatic connection method with no CDN overrides.',
+                ),
+                onChanged: widget.locked || _saving
+                    ? null
+                    : (_) => _save(ConnectionProtocol.auto),
+              ),
+              const Divider(height: 1, indent: 16, endIndent: 16),
+              RadioListTile<ConnectionProtocol>(
+                value: ConnectionProtocol.cdnFronting,
+                groupValue: _selectedProtocol,
+                title: const LocalizedText('CDN Fronting'),
+                subtitle: const LocalizedText(
+                  'Optional CDN IP and TLS SNI overrides for compatible automatic servers. Selecting it uses the automatic pool, not personal profiles.',
+                ),
+                onChanged: widget.locked || _saving
+                    ? null
+                    : (_) => setState(() => _selectedProtocol = ConnectionProtocol.cdnFronting),
+              ),
+            ]),
+          ),
+          if (_selectedProtocol == ConnectionProtocol.cdnFronting) ...[
+            const SizedBox(height: 14),
+            Card(
+              elevation: 0,
+              color: Theme.of(context).colorScheme.surface,
+              child: Padding(
+                padding: const EdgeInsets.all(18),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const LocalizedText(
+                      'CDN IPs',
+                      style: TextStyle(fontWeight: FontWeight.w700),
+                    ),
+                    const SizedBox(height: 8),
+                    TextField(
+                      controller: _ipsController,
+                      enabled: !widget.locked && !_saving,
+                      minLines: 2,
+                      maxLines: 4,
+                      keyboardType: TextInputType.multiline,
+                      autocorrect: false,
+                      enableSuggestions: false,
+                      decoration: InputDecoration(
+                        hintText: context.tr('One IP per line, or separate with commas'),
+                        border: const OutlineInputBorder(),
+                      ),
+                    ),
+                    const SizedBox(height: 18),
+                    const LocalizedText(
+                      'CDN SNI hostname',
+                      style: TextStyle(fontWeight: FontWeight.w700),
+                    ),
+                    const SizedBox(height: 8),
+                    TextField(
+                      controller: _sniController,
+                      enabled: !widget.locked && !_saving,
+                      keyboardType: TextInputType.url,
+                      autocorrect: false,
+                      enableSuggestions: false,
+                      decoration: InputDecoration(
+                        hintText: context.tr('example.com'),
+                        border: const OutlineInputBorder(),
+                      ),
+                    ),
+                    const SizedBox(height: 12),
+                    const LocalizedText(
+                      'Leave both fields empty to use the normal automatic connection. IP overrides are tried in order and require a compatible TLS WebSocket server.',
+                      style: TextStyle(color: _muted, fontSize: 12, height: 1.4),
+                    ),
+                    const SizedBox(height: 16),
+                    SizedBox(
+                      width: double.infinity,
+                      child: FilledButton.icon(
+                        onPressed: widget.locked || _saving
+                            ? null
+                            : () => _save(ConnectionProtocol.cdnFronting),
+                        icon: _saving
+                            ? const SizedBox(
+                                width: 18,
+                                height: 18,
+                                child: CircularProgressIndicator(strokeWidth: 2),
+                              )
+                            : const Icon(Icons.save_rounded),
+                        label: const LocalizedText('Save'),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ],
+          if (widget.locked) ...[
+            const SizedBox(height: 12),
+            const LocalizedText(
+              'Disconnect before changing connection protocol.',
+              style: TextStyle(color: _coral),
+              textAlign: TextAlign.center,
+            ),
+          ],
+        ],
+      );
 }
 
 Future<String?> _readClipboard(BuildContext context) async {
