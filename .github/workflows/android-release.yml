@@ -443,7 +443,12 @@ jobs:
           if '.setSmallIcon(smallIcon)' not in text:
               raise SystemExit('The VPN notification does not use the resolved small icon')
           preferred = 'val smallIcon = resolvedV2rayAgSmallIcon'
-          if preferred not in text or text.index(preferred) > text.index('current?.APPLICATION_ICON'):
+          if preferred not in text:
+              raise SystemExit('Could not locate the custom notification icon selection')
+          selection_end = text.find('?: android.R.drawable.ic_dialog_info', text.index(preferred))
+          selection = text[text.index(preferred):selection_end] if selection_end >= 0 else ''
+          app_icon_fallback = 'current?.APPLICATION_ICON?.takeIf { it != 0 }'
+          if not selection or selection.find(app_icon_fallback) < 0 or selection.index('resolvedV2rayAgSmallIcon') > selection.index(app_icon_fallback):
               raise SystemExit('The custom transparent notification glyph must take priority over the launcher icon')
           service.write_text(text)
           print('The transparent V2rayAG glyph is preferred for the VPN notification.')
