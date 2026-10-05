@@ -402,7 +402,7 @@ jobs:
       - name: Resolve dependencies
         run: flutter pub get
 
-      - name: Ensure the custom V2rayAG notification glyph is used as fallback
+      - name: Prefer the transparent V2rayAG notification glyph over the launcher icon
         run: |
           python3 - <<'PY'
           from pathlib import Path
@@ -430,8 +430,8 @@ jobs:
               val type = profile.NOTIFICATION_ICON_RESOURCE_TYPE.ifBlank { "drawable" }
               resources.getIdentifier(name, type, packageName).takeIf { it != 0 }
           }
-          val smallIcon = current?.APPLICATION_ICON?.takeIf { it != 0 }
-              ?: resolvedV2rayAgSmallIcon
+          val smallIcon = resolvedV2rayAgSmallIcon
+              ?: current?.APPLICATION_ICON?.takeIf { it != 0 }
               ?: applicationInfo.icon.takeIf { it != 0 }
               ?: android.R.drawable.ic_dialog_info
           '''
@@ -440,8 +440,13 @@ jobs:
               text = text.replace(old_icon, '.setSmallIcon(smallIcon)', 1)
           elif '.setSmallIcon(smallIcon)' not in text:
               raise SystemExit('Could not replace the generic notification fallback icon')
+          if '.setSmallIcon(smallIcon)' not in text:
+              raise SystemExit('The VPN notification does not use the resolved small icon')
+          preferred = 'val smallIcon = resolvedV2rayAgSmallIcon'
+          if preferred not in text or text.index(preferred) > text.index('current?.APPLICATION_ICON'):
+              raise SystemExit('The custom transparent notification glyph must take priority over the launcher icon')
           service.write_text(text)
-          print('V2rayAG notification-icon fallback is configured in the native service.')
+          print('The transparent V2rayAG glyph is preferred for the VPN notification.')
           PY
 
       - name: Analyze Dart code
