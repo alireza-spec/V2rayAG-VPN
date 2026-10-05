@@ -106,7 +106,6 @@ class V2rayLocalizations {
     'CDN Fronting': 'عبور از CDN',
     'CDN IPs': 'IPهای CDN',
     'CDN SNI hostname': 'نام میزبان SNI در CDN',
-    'Close': 'بستن',
     'Scan IPs': 'اسکن IPها',
     'Scan SNI domains': 'اسکن دامنه‌های SNI',
     'Scan CDN IPs': 'اسکن IPهای CDN',
