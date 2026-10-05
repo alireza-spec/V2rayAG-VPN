@@ -407,6 +407,7 @@ jobs:
           python3 - <<'PY'
           from pathlib import Path
           import os
+          import re
 
           pub_cache = Path(os.environ.get('PUB_CACHE', Path.home() / '.pub-cache'))
           rel = Path('android/src/main/kotlin/com/github/tfox/flutter_vless/xray/service/XrayVPNService.kt')
@@ -436,19 +437,33 @@ jobs:
               ?: android.R.drawable.ic_dialog_info
           '''
               text = text.replace(anchor, icon_setup, 1)
+          else:
+              legacy_selection = re.compile(
+                  r'val smallIcon = current\?\.APPLICATION_ICON\?\.takeIf \{ it != 0 \}\s+'
+                  r'\?: resolvedV2rayAgSmallIcon\s+'
+                  r'\?: applicationInfo\.icon\.takeIf \{ it != 0 \}\s+'
+                  r'\?: android\.R\.drawable\.ic_dialog_info'
+              )
+              corrected_selection = '''val smallIcon = resolvedV2rayAgSmallIcon
+                  ?: current?.APPLICATION_ICON?.takeIf { it != 0 }
+                  ?: applicationInfo.icon.takeIf { it != 0 }
+                  ?: android.R.drawable.ic_dialog_info'''
+              text, count = legacy_selection.subn(corrected_selection, text, count=1)
+              if count != 1 and 'val smallIcon = resolvedV2rayAgSmallIcon' not in text:
+                  raise SystemExit('Could not prioritize the custom notification icon in the cached native source')
           if old_icon in text:
               text = text.replace(old_icon, '.setSmallIcon(smallIcon)', 1)
           elif '.setSmallIcon(smallIcon)' not in text:
               raise SystemExit('Could not replace the generic notification fallback icon')
           if '.setSmallIcon(smallIcon)' not in text:
               raise SystemExit('The VPN notification does not use the resolved small icon')
-          preferred = 'val smallIcon = resolvedV2rayAgSmallIcon'
-          if preferred not in text:
-              raise SystemExit('Could not locate the custom notification icon selection')
-          selection_end = text.find('?: android.R.drawable.ic_dialog_info', text.index(preferred))
-          selection = text[text.index(preferred):selection_end] if selection_end >= 0 else ''
-          app_icon_fallback = 'current?.APPLICATION_ICON?.takeIf { it != 0 }'
-          if not selection or selection.find(app_icon_fallback) < 0 or selection.index('resolvedV2rayAgSmallIcon') > selection.index(app_icon_fallback):
+          preferred_selection = re.compile(
+              r'val smallIcon = resolvedV2rayAgSmallIcon\s+'
+              r'\?: current\?\.APPLICATION_ICON\?\.takeIf \{ it != 0 \}\s+'
+              r'\?: applicationInfo\.icon\.takeIf \{ it != 0 \}\s+'
+              r'\?: android\.R\.drawable\.ic_dialog_info'
+          )
+          if not preferred_selection.search(text):
               raise SystemExit('The custom transparent notification glyph must take priority over the launcher icon')
           service.write_text(text)
           print('The transparent V2rayAG glyph is preferred for the VPN notification.')
