@@ -113,7 +113,7 @@ class V2rayLocalizations {
     'Auto or optional CDN Fronting settings': 'حالت خودکار یا تنظیمات اختیاری عبور از CDN',
     'Choose how automatic-pool connections should be routed. Auto is the default and leaves current connections unchanged.': 'روش مسیریابی اتصال‌های مخزن خودکار را انتخاب کنید. حالت خودکار پیش‌فرض است و روش فعلی اتصال را بدون تغییر نگه می‌دارد.',
     'Use the existing automatic connection method with no CDN overrides.': 'از روش فعلی اتصال خودکار، بدون هیچ بازنویسی CDN، استفاده می‌شود.',
-    'Optional CDN IP and TLS SNI overrides for compatible automatic servers. Selecting it uses the automatic pool, not personal profiles.': 'بازنویسی اختیاری IP مربوط به CDN و SNI در TLS برای سرورهای خودکار سازگار. با انتخاب آن از مخزن خودکار استفاده می‌شود، نه پروفایل‌های شخصی.'
+    'Optional CDN IP and TLS SNI overrides for compatible automatic servers. Selecting it uses the automatic pool, not personal profiles.': 'بازنویسی اختیاری IP مربوط به CDN و SNI در TLS برای سرورهای خودکار سازگار. با انتخاب آن از مخزن خودکار استفاده می‌شود، نه پروفایل‌های شخصی.',
     'Leave both fields empty to use the normal automatic connection. IP overrides are tried in order and require a compatible TLS WebSocket server.': 'برای استفاده از اتصال خودکار معمول، هر دو کادر را خالی بگذارید. IPها به‌ترتیب آزمایش می‌شوند و به سرور سازگار با TLS و WebSocket نیاز دارند.',
     'Disconnect before changing connection protocol.': 'برای تغییر پروتکل اتصال، ابتدا اتصال را قطع کنید.',
     'Connection protocol settings saved.': 'تنظیمات پروتکل اتصال ذخیره شد.',

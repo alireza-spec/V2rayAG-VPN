@@ -489,15 +489,13 @@ class _VpnShellState extends State<VpnShell> {
       if (!mounted) return false;
       setState(() {
         _cdnFrontingSettings = validated;
-        if (validated.protocol == ConnectionProtocol.cdnFronting) {
-          _useManualProfile = false;
-        }
+        // Both protocol choices use the automatic pool. Selecting Personal is
+        // a separate action and resets the protocol to Auto.
+        _useManualProfile = false;
         _tab = 0;
       });
-      if (validated.protocol == ConnectionProtocol.cdnFronting) {
-        _connectionModeChangedByUser = true;
-        unawaited(_saveConnectionMode(false));
-      }
+      _connectionModeChangedByUser = true;
+      unawaited(_saveConnectionMode(false));
       _showMessage('Connection protocol settings saved.');
       return true;
     } on FormatException catch (error) {
@@ -506,6 +504,7 @@ class _VpnShellState extends State<VpnShell> {
     } on Object {
       if (mounted) {
         final persisted = await _cdnPreferencesRepository.read();
+        if (!mounted) return false;
         setState(() => _cdnFrontingSettings = persisted);
         _showMessage('Could not save connection protocol settings.');
       }
@@ -2765,6 +2764,29 @@ class _ConnectionProtocolPageState extends State<_ConnectionProtocolPage> {
     }
   }
 
+  Widget _protocolOption({
+    required ConnectionProtocol protocol,
+    required String label,
+    required String subtitle,
+    required VoidCallback onTap,
+  }) {
+    final selected = _selectedProtocol == protocol;
+    return Semantics(
+      selected: selected,
+      button: true,
+      child: ListTile(
+        selected: selected,
+        leading: Icon(
+          selected ? Icons.radio_button_checked_rounded : Icons.radio_button_off_rounded,
+          color: selected ? Theme.of(context).colorScheme.primary : _muted,
+        ),
+        title: LocalizedText(label),
+        subtitle: LocalizedText(subtitle),
+        onTap: widget.locked || _saving ? null : onTap,
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) => ListView(
         padding: const EdgeInsets.fromLTRB(20, 18, 20, 28),
@@ -2797,28 +2819,18 @@ class _ConnectionProtocolPageState extends State<_ConnectionProtocolPage> {
             elevation: 0,
             color: Theme.of(context).colorScheme.surface,
             child: Column(children: [
-              RadioListTile<ConnectionProtocol>(
-                value: ConnectionProtocol.auto,
-                groupValue: _selectedProtocol,
-                title: const LocalizedText('Auto'),
-                subtitle: const LocalizedText(
-                  'Use the existing automatic connection method with no CDN overrides.',
-                ),
-                onChanged: widget.locked || _saving
-                    ? null
-                    : (_) => _save(ConnectionProtocol.auto),
+              _protocolOption(
+                protocol: ConnectionProtocol.auto,
+                label: 'Auto',
+                subtitle: 'Use the existing automatic connection method with no CDN overrides.',
+                onTap: () => _save(ConnectionProtocol.auto),
               ),
               const Divider(height: 1, indent: 16, endIndent: 16),
-              RadioListTile<ConnectionProtocol>(
-                value: ConnectionProtocol.cdnFronting,
-                groupValue: _selectedProtocol,
-                title: const LocalizedText('CDN Fronting'),
-                subtitle: const LocalizedText(
-                  'Optional CDN IP and TLS SNI overrides for compatible automatic servers. Selecting it uses the automatic pool, not personal profiles.',
-                ),
-                onChanged: widget.locked || _saving
-                    ? null
-                    : (_) => setState(() => _selectedProtocol = ConnectionProtocol.cdnFronting),
+              _protocolOption(
+                protocol: ConnectionProtocol.cdnFronting,
+                label: 'CDN Fronting',
+                subtitle: 'Optional CDN IP and TLS SNI overrides for compatible automatic servers. Selecting it uses the automatic pool, not personal profiles.',
+                onTap: () => setState(() => _selectedProtocol = ConnectionProtocol.cdnFronting),
               ),
             ]),
           ),
