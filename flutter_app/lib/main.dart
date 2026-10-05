@@ -255,6 +255,9 @@ class _VpnShellState extends State<VpnShell> {
   bool _activePoolPingChecked = false;
   bool? _activePoolTelegramVerified;
   String? _activePoolLeaseId;
+  String? _cdnAttemptIp;
+  int _cdnAttemptIndex = 0;
+  int _cdnAttemptCount = 0;
   static const _activePoolSummaryKey = 'active_pool_summary_v1';
   final Map<int, int> _profilePings = {};
   final Map<int, String> _profilePingFailures = {};
@@ -484,13 +487,16 @@ class _VpnShellState extends State<VpnShell> {
 
   Future<bool> _saveConnectionProtocol(CdnFrontingSettings next) async {
     if (_engine.connected || _engine.connecting || _engine.disconnecting ||
-        _poolSearching || _subscriptionBusy || _engine.busy) {
+        _subscriptionBusy || _engine.busy) {
       _showMessage('Disconnect before changing connection protocol.');
       return false;
     }
     _connectionProtocolChangedByUser = true;
     try {
       final validated = next.validated();
+      // If automatic acquisition is between candidates, saving edits safely
+      // cancels the pending retry loop. A live native tunnel remains locked.
+      if (_poolSearching) _cancelPoolSearch = true;
       await _cdnPreferencesRepository.save(validated);
       if (!mounted) return false;
       setState(() {
@@ -767,9 +773,10 @@ class _VpnShellState extends State<VpnShell> {
     String? retainedLeaseId;
     var sawCdnCompatibleCandidate = false;
     var sawCdnIncompatibleCandidate = false;
+    final cdnSettingsForAttempt = _cdnFrontingSettings;
     final cdnOverridesActive =
-        _cdnFrontingSettings.protocol == ConnectionProtocol.cdnFronting &&
-            _cdnFrontingSettings.hasOverrides;
+        cdnSettingsForAttempt.protocol == ConnectionProtocol.cdnFronting &&
+            cdnSettingsForAttempt.hasOverrides;
     _activePoolLeaseId = null;
     setState(() {
       _poolSearching = true;
@@ -778,6 +785,9 @@ class _VpnShellState extends State<VpnShell> {
       _activePoolProfile = null;
       _activePoolPingChecked = false;
       _activePoolTelegramVerified = null;
+      _cdnAttemptIp = null;
+      _cdnAttemptIndex = 0;
+      _cdnAttemptCount = 0;
     });
     unawaited(_persistPoolSummary(null));
 
@@ -804,7 +814,7 @@ class _VpnShellState extends State<VpnShell> {
         final candidate = lease.candidate;
         late final List<VpnProfile> profileAttempts;
         try {
-          profileAttempts = buildCdnProfileAttempts(candidate.profile, _cdnFrontingSettings);
+          profileAttempts = buildCdnProfileAttempts(candidate.profile, cdnSettingsForAttempt);
           sawCdnCompatibleCandidate = true;
         } on CdnProfileNotSupportedException {
           sawCdnIncompatibleCandidate = true;
@@ -821,9 +831,18 @@ class _VpnShellState extends State<VpnShell> {
         }
         VpnProfile? attemptedProfile;
         var connected = false;
-        for (final profileAttempt in profileAttempts) {
+        for (var attemptIndex = 0; attemptIndex < profileAttempts.length; attemptIndex++) {
           if (_cancelPoolSearch) break;
+          final profileAttempt = profileAttempts[attemptIndex];
           attemptedProfile = profileAttempt;
+          if (mounted && cdnSettingsForAttempt.protocol == ConnectionProtocol.cdnFronting) {
+            final ips = cdnSettingsForAttempt.parsedIps;
+            setState(() {
+              _cdnAttemptIp = ips.isEmpty ? null : ips[attemptIndex];
+              _cdnAttemptIndex = attemptIndex + 1;
+              _cdnAttemptCount = profileAttempts.length;
+            });
+          }
           connected = await _engine.connect(
             profileAttempt,
             blockedApps: _excludedPackages.toList(growable: false),
@@ -1516,6 +1535,12 @@ class _VpnShellState extends State<VpnShell> {
         poolPingChecked: _activePoolPingChecked,
         poolTelegramVerified: _activePoolTelegramVerified,
         poolSearching: _poolSearching,
+        cdnProtocolSelected: _cdnFrontingSettings.protocol == ConnectionProtocol.cdnFronting && !_useManualProfile,
+        cdnIps: _cdnFrontingSettings.cdnIps,
+        cdnSniHostname: _cdnFrontingSettings.sniHostname,
+        cdnAttemptIp: _cdnAttemptIp,
+        cdnAttemptIndex: _cdnAttemptIndex,
+        cdnAttemptCount: _cdnAttemptCount,
         onUseAutomaticPool: _useAutomaticPool,
         onUsePersonalProfile: () => _usePersonalProfile(openServers: false),
         onOpenServers: () => setState(() => _tab = 1),
@@ -1584,7 +1609,7 @@ class _VpnShellState extends State<VpnShell> {
         key: const ValueKey('connection-protocol-page'),
         settings: _cdnFrontingSettings,
         locked: _engine.connected || _engine.connecting || _engine.disconnecting ||
-            _poolSearching || _subscriptionBusy || _engine.busy,
+            _subscriptionBusy || _engine.busy,
         onSave: _saveConnectionProtocol,
         onBack: () => setState(() => _tab = 2),
       ),
@@ -1744,6 +1769,28 @@ class _VpnShellState extends State<VpnShell> {
   }
 }
 
+class _CdnValueRow extends StatelessWidget {
+  const _CdnValueRow({required this.label, required this.value});
+
+  final String label;
+  final String value;
+
+  @override
+  Widget build(BuildContext context) => Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          SizedBox(width: 116, child: LocalizedText(label, style: const TextStyle(fontSize: 12, color: _muted))),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Directionality(
+              textDirection: TextDirection.ltr,
+              child: SelectableText(value, style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600)),
+            ),
+          ),
+        ],
+      );
+}
+
 class _HomePage extends StatelessWidget {
   const _HomePage({
     required this.profile,
@@ -1751,6 +1798,12 @@ class _HomePage extends StatelessWidget {
     required this.poolPingChecked,
     required this.poolTelegramVerified,
     required this.poolSearching,
+    required this.cdnProtocolSelected,
+    required this.cdnIps,
+    required this.cdnSniHostname,
+    required this.cdnAttemptIp,
+    required this.cdnAttemptIndex,
+    required this.cdnAttemptCount,
     required this.onUseAutomaticPool,
     required this.onUsePersonalProfile,
     required this.onOpenServers,
@@ -1770,6 +1823,12 @@ class _HomePage extends StatelessWidget {
   final bool poolPingChecked;
   final bool? poolTelegramVerified;
   final bool poolSearching;
+  final bool cdnProtocolSelected;
+  final String cdnIps;
+  final String cdnSniHostname;
+  final String? cdnAttemptIp;
+  final int cdnAttemptIndex;
+  final int cdnAttemptCount;
   final VoidCallback onUseAutomaticPool;
   final VoidCallback onUsePersonalProfile;
   final VoidCallback onOpenServers;
@@ -1788,6 +1847,9 @@ class _HomePage extends StatelessWidget {
     final dark = Theme.of(context).brightness == Brightness.dark;
     final card = dark ? const Color(0xFF192321) : Colors.white;
     final activeOrPending = engine.connected || engine.connecting || engine.disconnecting || poolSearching;
+    final cdnFrontingSelected = cdnProtocolSelected && !personalMode;
+    final savedCdnIps = cdnIps.trim();
+    final savedCdnSni = cdnSniHostname.trim();
     final candidate = poolSummary;
     final visibleLatencyMs = engine.latencyForProfile(profile);
     final poolConnected = candidate != null && engine.connected;
@@ -1856,7 +1918,9 @@ class _HomePage extends StatelessWidget {
               LocalizedText(poolSearching ? 'CONNECTING' : engine.stateLabel, style: TextStyle(fontSize: 12, letterSpacing: 2.1, fontWeight: FontWeight.w800, color: engine.connected ? const Color(0xFF67DDB7) : (dark ? const Color(0xFFE0EAE6) : _ink))),
               const SizedBox(height: 5),
               LocalizedText(
-                poolSearching
+                poolSearching && cdnFrontingSelected
+                    ? 'Trying CDN Fronting…'
+                    : poolSearching
                     ? 'Connecting to a suitable server…'
                     : profile == null
                         ? poolSummary != null && engine.connected
@@ -1893,6 +1957,80 @@ class _HomePage extends StatelessWidget {
             ],
           ),
         ),
+        if (cdnFrontingSelected) ...[
+          const SizedBox(height: 14),
+          Container(
+            width: double.infinity,
+            padding: const EdgeInsets.all(16),
+            decoration: BoxDecoration(
+              color: card,
+              borderRadius: BorderRadius.circular(20),
+              border: Border.all(color: dark ? Colors.white12 : const Color(0xFFE8ECE8)),
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(children: [
+                  const Icon(Icons.hub_rounded, color: Color(0xFF58A98E), size: 18),
+                  const SizedBox(width: 8),
+                  Expanded(child: LocalizedText(poolSearching ? 'Trying CDN Fronting…' : 'CDN Fronting', style: const TextStyle(fontWeight: FontWeight.w800))),
+                  if (poolSearching) const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2)),
+                ]),
+                const SizedBox(height: 10),
+                _CdnValueRow(
+                  label: 'Saved CDN IPs',
+                  value: savedCdnIps.isEmpty ? context.tr('Not set — use automatic server address') : savedCdnIps,
+                ),
+                const SizedBox(height: 4),
+                _CdnValueRow(
+                  label: 'Saved CDN SNI',
+                  value: savedCdnSni.isEmpty ? context.tr('Not set — use server hostname') : savedCdnSni,
+                ),
+                if (poolSearching) ...[
+                  const SizedBox(height: 8),
+                  LocalizedText(
+                    savedCdnIps.isEmpty && savedCdnSni.isEmpty
+                        ? 'CDN fields are empty; the existing automatic route is used. Meek is not available in this build.'
+                        : 'Trying CDN overrides on compatible TLS WebSocket servers…',
+                    style: TextStyle(fontSize: 12, color: dark ? const Color(0xFFB6C6C0) : _muted),
+                  ),
+                  if (cdnAttemptIndex > 0 && cdnAttemptCount > 0) ...[
+                    const SizedBox(height: 4),
+                    Text('${context.tr('Attempt')} $cdnAttemptIndex/$cdnAttemptCount', style: const TextStyle(fontSize: 12, color: _muted)),
+                  ],
+                  if (cdnAttemptIp != null) ...[
+                    const SizedBox(height: 4),
+                    _CdnValueRow(label: 'Currently trying', value: cdnAttemptIp!),
+                  ],
+                  const SizedBox(height: 4),
+                  _CdnValueRow(
+                    label: 'SNI hostname',
+                    value: savedCdnSni.isEmpty ? context.tr('Not set — use server hostname') : savedCdnSni,
+                  ),
+                  Align(
+                    alignment: AlignmentDirectional.centerEnd,
+                    child: TextButton.icon(
+                      onPressed: onToggleConnection,
+                      icon: const Icon(Icons.stop_circle_outlined),
+                      label: const LocalizedText('Stop connection attempts'),
+                    ),
+                  ),
+                ] else if (engine.connected) ...[
+                  const SizedBox(height: 8),
+                  LocalizedText(
+                    savedCdnIps.isEmpty && savedCdnSni.isEmpty
+                        ? 'Tunnel connected on the existing automatic route; empty CDN fields do not enable Meek.'
+                        : 'The native VPN tunnel is connected with the saved CDN overrides; live time and traffic are shown below.',
+                    style: const TextStyle(fontSize: 12, color: _muted),
+                  ),
+                ] else ...[
+                  const SizedBox(height: 8),
+                  const LocalizedText('The scan confirms direct TCP/TLS access only; it does not confirm this VPN route.', style: TextStyle(fontSize: 12, color: _muted, height: 1.35)),
+                ],
+              ],
+            ),
+          ),
+        ],
         const SizedBox(height: 18),
         Container(
           decoration: BoxDecoration(
@@ -1910,9 +2048,11 @@ class _HomePage extends StatelessWidget {
                 const SizedBox(width: 8),
                 Expanded(child: LocalizedText(poolConnected ? 'SECURE ROUTE' : 'DESTINATION', style: const TextStyle(fontSize: 10, letterSpacing: 1.4, fontWeight: FontWeight.w800, color: _muted))),
                 Text(
-                  poolConnected || poolSearching
-                      ? context.tr('AUTOMATIC')
-                      : (profile?.protocol ?? context.tr(engine.connected ? 'ACTIVE SESSION' : 'NO SERVER')),
+                  cdnFrontingSelected
+                      ? context.tr('CDN FRONTING')
+                      : poolConnected || poolSearching
+                          ? context.tr('AUTOMATIC')
+                          : (profile?.protocol ?? context.tr(engine.connected ? 'ACTIVE SESSION' : 'NO SERVER')) ,
                   textDirection: TextDirection.ltr,
                   style: const TextStyle(fontSize: 10, fontWeight: FontWeight.w800, color: _muted),
                 ),
@@ -2419,7 +2559,14 @@ class _ProfilesPage extends StatelessWidget {
     final dark = Theme.of(context).brightness == Brightness.dark;
     final customSubscriptions = subscriptions;
     return ListView(padding: const EdgeInsets.fromLTRB(20, 18, 20, 28), children: [
-      LocalizedText('Servers', style: Theme.of(context).textTheme.headlineMedium?.copyWith(fontWeight: FontWeight.w800)),
+      Row(children: [
+        Expanded(child: LocalizedText('Servers', style: Theme.of(context).textTheme.headlineMedium?.copyWith(fontWeight: FontWeight.w800))),
+        IconButton(
+          tooltip: context.tr('Server information'),
+          onPressed: () => _showServerInformation(context),
+          icon: Icon(Icons.info_outline_rounded, color: secureStorageNeedsRepair ? _coral : null),
+        ),
+      ]),
       const SizedBox(height: 6),
       const LocalizedText('Add your subscription, refresh servers, and choose a route.', style: TextStyle(color: _muted)),
       const SizedBox(height: 18),
@@ -2427,28 +2574,6 @@ class _ProfilesPage extends StatelessWidget {
         const Expanded(child: LocalizedText('My subscriptions', style: TextStyle(fontSize: 17, fontWeight: FontWeight.w800))),
         TextButton.icon(onPressed: connected || subscriptionBusy ? null : onAddSubscription, icon: const Icon(Icons.add_rounded), label: const LocalizedText('Add')),
       ]),
-      if (secureStorageNotice)
-        Card(
-          color: dark ? const Color(0xFF3A2C1D) : const Color(0xFFFFF1E5),
-          child: ListTile(
-            leading: const Icon(Icons.warning_amber_rounded, color: _coral),
-            title: LocalizedText(secureStorageNeedsRepair
-                ? 'Secure storage unavailable'
-                : 'Encrypted storage notice'),
-            subtitle: LocalizedText(secureStorageNeedsRepair
-                ? 'A secure save could not be verified. Do not close the app until the save succeeds; unreadable records were not deleted.'
-                : legacyDataUnavailable
-                    ? 'Older encrypted records remain untouched but could not be read. New saves use a separate encrypted store; re-add any missing items.'
-                    : storageNamespaceRotated
-                        ? 'Storage was moved to an isolated encrypted namespace. Existing data was left untouched and new saves are verified.'
-                        : 'Encrypted records were left untouched. New records are saved only after secure read-back verification.'),
-            trailing: IconButton(
-              tooltip: context.tr('Secure storage information'),
-              onPressed: subscriptionBusy ? null : onRepairSecureStorage,
-              icon: const Icon(Icons.info_outline_rounded),
-            ),
-          ),
-        ),
       if (customSubscriptions.isEmpty)
         const Padding(
           padding: EdgeInsets.only(bottom: 8),
@@ -2536,9 +2661,55 @@ class _ProfilesPage extends StatelessWidget {
             .where((i) => i >= profileSources.length || profileSources[i] == null)
             .map((index) => _profileCard(context, index, dark)),
       ],
-      const SizedBox(height: 12),
-      const LocalizedText('Profile configurations are encrypted in Android secure storage on this device. If secure storage is unavailable, changes remain session-only and the app shows a diagnostic code. Do not share screenshots or logs that reveal a server address.', style: TextStyle(fontSize: 12, color: _muted, height: 1.45)),
     ]);
+  }
+
+  void _showServerInformation(BuildContext context) {
+    final storageTitle = secureStorageNeedsRepair
+        ? 'Secure storage unavailable'
+        : 'Encrypted storage notice';
+    final storageMessage = secureStorageNeedsRepair
+        ? 'A secure save could not be verified. Do not close the app until the save succeeds; unreadable records were not deleted.'
+        : legacyDataUnavailable
+            ? 'Older encrypted records remain untouched but could not be read. New saves use a separate encrypted store; re-add any missing items.'
+            : storageNamespaceRotated
+                ? 'Storage was moved to an isolated encrypted namespace. Existing data was left untouched and new saves are verified.'
+                : 'Encrypted records were left untouched. New records are saved only after secure read-back verification.';
+    showDialog<void>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: LocalizedText(secureStorageNotice ? storageTitle : 'Server information'),
+        content: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              if (secureStorageNotice) ...[
+                LocalizedText(storageMessage),
+                const SizedBox(height: 12),
+              ],
+              const LocalizedText('Profile configurations are encrypted in Android secure storage on this device. If secure storage is unavailable, changes remain session-only and the app shows a diagnostic code. Do not share screenshots or logs that reveal a server address.'),
+            ],
+          ),
+        ),
+        actions: [
+          if (secureStorageNeedsRepair)
+            TextButton(
+              onPressed: subscriptionBusy
+                  ? null
+                  : () {
+                      Navigator.of(dialogContext).pop();
+                      onRepairSecureStorage();
+                    },
+              child: const LocalizedText('Repair secure storage'),
+            ),
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(),
+            child: const LocalizedText('Close'),
+          ),
+        ],
+      ),
+    );
   }
 }
 
@@ -2604,7 +2775,14 @@ class _SettingsPage extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) => ListView(padding: const EdgeInsets.fromLTRB(20, 18, 20, 28), children: [
-        LocalizedText('Settings', style: Theme.of(context).textTheme.headlineMedium?.copyWith(fontWeight: FontWeight.w800)),
+        Row(children: [
+          Expanded(child: LocalizedText('Settings', style: Theme.of(context).textTheme.headlineMedium?.copyWith(fontWeight: FontWeight.w800))),
+          IconButton(
+            tooltip: context.tr('Platform scope information'),
+            onPressed: () => _showPlatformScopeInformation(context),
+            icon: const Icon(Icons.info_outline_rounded),
+          ),
+        ]),
         const SizedBox(height: 6),
         const LocalizedText('Appearance settings work now; Android VPN connection is managed from Connect.', style: TextStyle(color: _muted)),
         const SizedBox(height: 20),
@@ -2669,23 +2847,27 @@ class _SettingsPage extends StatelessWidget {
                   },
           ),
         ])),
-        const SizedBox(height: 16),
-        Container(
-          padding: const EdgeInsets.all(16),
-          decoration: BoxDecoration(
-            color: Theme.of(context).brightness == Brightness.dark ? const Color(0xFF29221F) : const Color(0xFFFFF1E8),
-            border: Theme.of(context).brightness == Brightness.dark ? Border.all(color: const Color(0xFF594038)) : null,
-            borderRadius: BorderRadius.circular(20),
-          ),
-          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-            LocalizedText('Platform scope', style: TextStyle(fontWeight: FontWeight.w800, color: Theme.of(context).brightness == Brightness.dark ? const Color(0xFFFFB29B) : const Color(0xFF8A5548))),
-            const SizedBox(height: 8),
-            LocalizedText('Android VPN sessions route system DNS through the selected proxy. You can exclude selected launcher apps from the VPN. iPhone still needs its Network Extension project, Apple signing, and device testing. A kill switch, auto-connect, and trusted country lookup are not enabled in this build.', style: TextStyle(fontSize: 12, height: 1.5, color: Theme.of(context).brightness == Brightness.dark ? const Color(0xFFE6C7BC) : const Color(0xFF8A5548))),
-          ]),
-        ),
         const SizedBox(height: 20),
         const ListTile(leading: _BrandMark(), title: LocalizedText('V2rayAG'), subtitle: LocalizedText('Source: Telegram @V2rayAG\nDeveloper: V2rayAG telegram channel and HashtagAlireza')),
       ]);
+
+  void _showPlatformScopeInformation(BuildContext context) {
+    showDialog<void>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const LocalizedText('Platform scope'),
+        content: const SingleChildScrollView(
+          child: LocalizedText(
+            'Android VPN sessions route system DNS through the selected proxy. You can exclude selected launcher apps from the VPN. iPhone still needs its Network Extension project, Apple signing, and device testing. A kill switch, auto-connect, and trusted country lookup are not enabled in this build.',
+            style: TextStyle(height: 1.5),
+          ),
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.of(dialogContext).pop(), child: const LocalizedText('Close')),
+        ],
+      ),
+    );
+  }
 }
 
 class _ConnectionProtocolPage extends StatefulWidget {
@@ -3009,7 +3191,7 @@ class _CdnScannerSheetState extends State<_CdnScannerSheet> {
       _cancelRequested = false;
       _error = null;
       _report = null;
-      _progress = const CdnScanProgress(completed: 0, total: 0, reachable: 0, failed: 0);
+      _progress = const CdnScanProgress(completed: 0, total: 0, reachable: 0, tcpReachable: 0, failed: 0);
     });
     try {
       final scanner = CdnEndpointScanner();
@@ -3129,7 +3311,7 @@ class _CdnScannerSheetState extends State<_CdnScannerSheet> {
             ]),
             const SizedBox(height: 12),
             const LocalizedText(
-              'Scans use this phone\'s live DNS and HTTPS/TLS on the current network. They only confirm reachability, not VPN or Meek compatibility.',
+              'The scan uses live DNS, a real TCP 443 connect-time measurement, and TLS. It does not prove that an IP/SNI pair can carry this VPN server.',
               style: TextStyle(color: _muted, height: 1.35),
             ),
             const SizedBox(height: 12),
@@ -3145,8 +3327,8 @@ class _CdnScannerSheetState extends State<_CdnScannerSheet> {
                 children: [
                   _ScanMetric(label: 'Scanned', value: '${_progress.completed}/${_progress.total}'),
                   _ScanMetric(label: 'Remaining', value: '${(_progress.total - _progress.completed).clamp(0, _progress.total)}'),
-                  _ScanMetric(label: 'Reachable', value: '${_progress.reachable}'),
-                  _ScanMetric(label: 'Failed', value: '${_progress.failed}'),
+                  _ScanMetric(label: 'TCP open', value: '${_progress.tcpReachable}'),
+                  _ScanMetric(label: 'TLS OK', value: '${_progress.reachable}'),
                 ],
               ),
             ),
@@ -3225,7 +3407,7 @@ class _CdnScannerSheetState extends State<_CdnScannerSheet> {
                           contentPadding: EdgeInsets.zero,
                           leading: Icon(Icons.check_circle_rounded, color: colors.tertiary),
                           title: SelectableText(candidate.value),
-                          subtitle: Text('${context.tr('TLS reachable')} · ${candidate.latencyMs} ms'),
+                          subtitle: Text('${context.tr('TCP 443 response')} · ${candidate.tcpLatencyMs} ms  |  ${context.tr('TLS handshake')} · ${candidate.tlsHandshakeMs} ms'),
                           trailing: Wrap(
                             spacing: 0,
                             crossAxisAlignment: WrapCrossAlignment.center,

@@ -13,8 +13,12 @@ void main() {
           lookups++;
           return [InternetAddress('192.0.2.10'), InternetAddress('192.0.2.11')];
         },
-        probe: (address, sni, timeout) async =>
-            sni == 'a248.e.akamai.net' ? (address.endsWith('.10') ? 45 : 82) : null,
+        probe: (address, sni, timeout) async => sni == 'a248.e.akamai.net'
+            ? CdnEndpointProbeResult(
+                tcpConnectMs: address.endsWith('.10') ? 16 : 27,
+                tlsHandshakeMs: address.endsWith('.10') ? 45 : 82,
+              )
+            : const CdnEndpointProbeResult(),
       );
       final updates = <CdnScanProgress>[];
 
@@ -26,20 +30,22 @@ void main() {
       expect(lookups, 1);
       expect(result.checked, 2);
       expect(result.reachable, 2);
-      expect(result.failed, 0);
+      expect(result.tcpReachable, 2);
+      expect(result.failed, result.checked - 2);
       expect(result.candidates.map((candidate) => candidate.value),
           ['192.0.2.10', '192.0.2.11']);
-      expect(updates.last.completed, 2);
+      expect(updates.last.completed, result.checked);
       expect(updates.last.reachable, 2);
+      expect(updates.last.tcpReachable, 2);
     });
 
     test('SNI scan checks names against current IPs and ranks by TLS delay', () async {
       final scanner = CdnEndpointScanner(
         lookup: (_) async => [InternetAddress('192.0.2.20')],
         probe: (_, sni, timeout) async => switch (sni) {
-          'a77.net.akamai.net' => 31,
-          'www.akamai.com' => 95,
-          _ => null,
+          'a77.net.akamai.net' => const CdnEndpointProbeResult(tcpConnectMs: 13, tlsHandshakeMs: 31),
+          'www.akamai.com' => const CdnEndpointProbeResult(tcpConnectMs: 21, tlsHandshakeMs: 95),
+          _ => const CdnEndpointProbeResult(),
         },
       );
 
@@ -47,7 +53,7 @@ void main() {
 
       expect(result.checked, CdnEndpointScanner.akamaiSniCandidates.length);
       expect(result.reachable, 2);
-      expect(result.failed, 2);
+      expect(result.failed, result.checked - 2);
       expect(result.candidates.first.value, 'a77.net.akamai.net');
       expect(result.candidates.last.value, 'www.akamai.com');
     });
@@ -58,7 +64,7 @@ void main() {
         lookup: (_) async => [InternetAddress('192.0.2.30')],
         probe: (_, __, ___) async {
           probed = true;
-          return 10;
+          return const CdnEndpointProbeResult(tcpConnectMs: 10, tlsHandshakeMs: 10);
         },
       );
 

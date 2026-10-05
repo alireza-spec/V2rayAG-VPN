@@ -4,11 +4,32 @@ import 'cdn_fronting.dart';
 
 typedef CdnScanProgressCallback = void Function(CdnScanProgress progress);
 
+class CdnEndpointProbeResult {
+  const CdnEndpointProbeResult({this.tcpConnectMs, this.tlsHandshakeMs});
+
+  final int? tcpConnectMs;
+  final int? tlsHandshakeMs;
+
+  bool get tcpReachable => tcpConnectMs != null;
+  bool get tlsReachable => tlsHandshakeMs != null;
+}
+
+typedef CdnEndpointProbe = Future<CdnEndpointProbeResult> Function(
+    String address, String sni, Duration timeout);
+
 class CdnScanCandidate {
-  const CdnScanCandidate({required this.value, required this.latencyMs});
+  const CdnScanCandidate({
+    required this.value,
+    required this.tcpLatencyMs,
+    required this.tlsHandshakeMs,
+  });
 
   final String value;
-  final int latencyMs;
+  final int tcpLatencyMs;
+  final int tlsHandshakeMs;
+
+  /// Kept as a convenience for existing sort/display callers.
+  int get latencyMs => tlsHandshakeMs;
 }
 
 class CdnScanProgress {
@@ -16,12 +37,14 @@ class CdnScanProgress {
     required this.completed,
     required this.total,
     required this.reachable,
+    required this.tcpReachable,
     required this.failed,
   });
 
   final int completed;
   final int total;
   final int reachable;
+  final int tcpReachable;
   final int failed;
 }
 
@@ -29,6 +52,7 @@ class CdnScanReport {
   const CdnScanReport({
     required this.checked,
     required this.reachable,
+    required this.tcpReachable,
     required this.failed,
     required this.candidates,
   });
@@ -36,6 +60,7 @@ class CdnScanReport {
   /// Number of IP/SNI TLS handshakes completed.
   final int checked;
   final int reachable;
+  final int tcpReachable;
   final int failed;
   final List<CdnScanCandidate> candidates;
 }
@@ -54,25 +79,39 @@ class CdnEndpointScanner {
     this.timeout = const Duration(seconds: 3),
     this.maxConcurrency = 3,
     Future<List<InternetAddress>> Function(String host)? lookup,
-    Future<int?> Function(String address, String sni, Duration timeout)? probe,
+    CdnEndpointProbe? probe,
   })  : _lookup = lookup ?? _lookupHost,
         _probe = probe ?? _probeTls {
     assert(maxConcurrency > 0);
   }
 
+  // Resolve a broader set of commonly published Akamai hostnames live on
+  // each device/network; do not present a static, potentially stale IP list.
   static const akamaiSniCandidates = <String>[
     'a248.e.akamai.net',
     'a77.net.akamai.net',
     'ds-aksb.akamaized.net',
     'www.akamai.com',
+    'akamai.com',
+    'www.akamai.net',
+    'www.akamaihd.net',
+    'www.akamaized.net',
+    'www.akamaitechnologies.com',
+    'www.edgesuite.net',
+    'www.edgekey.net',
+    'www.akamaiedge.net',
+    'www.akamai.com.edgekey.net',
+    'download.akamai.com',
+    'content.akamai.com',
+    'client.akamai.com',
   ];
-  static const maxIpCandidates = 24;
-  static const maxSniCandidates = 8;
+  static const maxIpCandidates = 96;
+  static const maxSniCandidates = 16;
 
   final Duration timeout;
   final int maxConcurrency;
   final Future<List<InternetAddress>> Function(String host) _lookup;
-  final Future<int?> Function(String address, String sni, Duration timeout) _probe;
+  final CdnEndpointProbe _probe;
 
   Future<CdnScanReport> scanIps({
     String preferredSni = '',
@@ -151,13 +190,15 @@ class CdnEndpointScanner {
     bool Function()? isCancelled,
     CdnScanProgressCallback? onProgress,
   }) async {
-    final bestLatency = <String, int>{};
+    final bestByKey = <String, CdnScanCandidate>{};
     var completed = 0;
-    var successfulHandshakes = 0;
+    var successfulTcpPairs = 0;
+    var successfulTlsPairs = 0;
     onProgress?.call(CdnScanProgress(
       completed: 0,
       total: tasks.length,
       reachable: 0,
+      tcpReachable: 0,
       failed: 0,
     ));
     for (var offset = 0; offset < tasks.length; offset += maxConcurrency) {
@@ -166,31 +207,40 @@ class CdnEndpointScanner {
       final batch = tasks.sublist(offset, end);
       final outcomes = await Future.wait(batch.map((task) async =>
           (task, await _probe(task.address, task.sni, timeout))));
-      for (final (task, latency) in outcomes) {
+      for (final (task, probe) in outcomes) {
         completed++;
-        if (latency != null) {
-          successfulHandshakes++;
+        if (probe.tcpReachable) successfulTcpPairs++;
+        final tlsMs = probe.tlsHandshakeMs;
+        final tcpMs = probe.tcpConnectMs;
+        if (tlsMs != null && tcpMs != null) {
+          successfulTlsPairs++;
           final key = resultKey(task);
-          final previous = bestLatency[key];
-          if (previous == null || latency < previous) bestLatency[key] = latency;
+          final previous = bestByKey[key];
+          if (previous == null || tlsMs < previous.tlsHandshakeMs) {
+            bestByKey[key] = CdnScanCandidate(
+              value: key,
+              tcpLatencyMs: tcpMs,
+              tlsHandshakeMs: tlsMs,
+            );
+          }
         }
       }
       onProgress?.call(CdnScanProgress(
         completed: completed,
         total: tasks.length,
-        reachable: bestLatency.length,
-        failed: completed - successfulHandshakes,
+        reachable: bestByKey.length,
+        tcpReachable: successfulTcpPairs,
+        failed: completed - successfulTlsPairs,
       ));
     }
     if (isCancelled?.call() == true) throw const CdnScanCancelled();
-    final results = bestLatency.entries
-        .map((entry) => CdnScanCandidate(value: entry.key, latencyMs: entry.value))
-        .toList()
-      ..sort((a, b) => a.latencyMs.compareTo(b.latencyMs));
+    final results = bestByKey.values.toList()
+      ..sort((a, b) => a.tlsHandshakeMs.compareTo(b.tlsHandshakeMs));
     return CdnScanReport(
       checked: completed,
       reachable: results.length,
-      failed: completed - successfulHandshakes,
+      tcpReachable: successfulTcpPairs,
+      failed: completed - successfulTlsPairs,
       candidates: List.unmodifiable(results),
     );
   }
@@ -206,21 +256,33 @@ class CdnEndpointScanner {
   static Future<List<InternetAddress>> _lookupHost(String host) =>
       InternetAddress.lookup(host, type: InternetAddressType.any);
 
-  static Future<int?> _probeTls(
+  static Future<CdnEndpointProbeResult> _probeTls(
     String address,
     String sni,
     Duration timeout,
   ) async {
     Socket? socket;
     SecureSocket? secure;
-    final watch = Stopwatch()..start();
+    int? tcpMs;
     try {
+      final tcpWatch = Stopwatch()..start();
       socket = await Socket.connect(address, 443).timeout(timeout);
-      secure = await SecureSocket.secure(socket, host: sni).timeout(timeout);
-      watch.stop();
-      return watch.elapsedMilliseconds;
+      tcpWatch.stop();
+      tcpMs = tcpWatch.elapsedMilliseconds;
+
+      final tlsWatch = Stopwatch()..start();
+      try {
+        secure = await SecureSocket.secure(socket, host: sni).timeout(timeout);
+        tlsWatch.stop();
+        return CdnEndpointProbeResult(
+          tcpConnectMs: tcpMs,
+          tlsHandshakeMs: tlsWatch.elapsedMilliseconds,
+        );
+      } on Object {
+        return CdnEndpointProbeResult(tcpConnectMs: tcpMs);
+      }
     } on Object {
-      return null;
+      return const CdnEndpointProbeResult();
     } finally {
       secure?.destroy();
       socket?.destroy();
