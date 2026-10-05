@@ -746,6 +746,29 @@ class _VpnShellState extends State<VpnShell> {
           candidate.profile,
           blockedApps: _excludedPackages.toList(growable: false),
         );
+        if (_cancelPoolSearch) {
+          // A cancel can arrive while Android's permission sheet or start
+          // handshake is open. Reconcile native state before releasing its
+          // lease or allowing another route to start.
+          if (_engine.connected || _engine.connecting || _engine.disconnecting) {
+            final stopped = await _engine.disconnect();
+            if (!stopped &&
+                (_engine.connected || _engine.connecting || _engine.disconnecting)) {
+              retainedLeaseId = probe.lease.leaseId;
+              _activePoolLeaseId = probe.lease.leaseId;
+              _activePoolProfile = candidate.profile;
+              if (mounted) {
+                setState(() {
+                  _activePoolSummary = candidate.summary;
+                  _activePoolPingChecked = false;
+                  _activePoolTelegramVerified = null;
+                });
+                unawaited(_persistPoolSummary(candidate.summary));
+              }
+            }
+          }
+          break;
+        }
         if (!connected) {
           if (_cancelPoolSearch ||
               !shouldRetrySubscriptionProfile(_engine.failureCategory) ||
