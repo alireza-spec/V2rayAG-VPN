@@ -841,7 +841,7 @@ class _VpnShellState extends State<VpnShell> {
     unawaited(_saveConnectionMode(false));
   }
 
-  void _usePersonalProfile() {
+  void _usePersonalProfile({bool openServers = true}) {
     if (_engine.connected || _engine.connecting || _engine.disconnecting || _poolSearching) {
       _showMessage('Disconnect before changing connection mode.');
       return;
@@ -849,7 +849,7 @@ class _VpnShellState extends State<VpnShell> {
     _connectionModeChangedByUser = true;
     setState(() {
       _useManualProfile = true;
-      _tab = 1;
+      if (openServers) _tab = 1;
     });
     unawaited(_saveConnectionMode(true));
     if (_profiles.isEmpty) {
@@ -1401,6 +1401,11 @@ class _VpnShellState extends State<VpnShell> {
         poolTelegramVerified: _activePoolTelegramVerified,
         poolSearching: _poolSearching,
         onUseAutomaticPool: _useAutomaticPool,
+        onUsePersonalProfile: () => _usePersonalProfile(openServers: false),
+        onOpenServers: () => setState(() => _tab = 1),
+        personalMode: _useManualProfile,
+        modeSelectionEnabled: !_engine.connected && !_engine.connecting &&
+            !_engine.disconnecting && !_poolSearching && !_subscriptionBusy && !_engine.busy,
         engine: _engine,
         showDestination: widget.showDestination,
         reducedMotion: widget.reducedMotion,
@@ -1610,6 +1615,10 @@ class _HomePage extends StatelessWidget {
     required this.poolTelegramVerified,
     required this.poolSearching,
     required this.onUseAutomaticPool,
+    required this.onUsePersonalProfile,
+    required this.onOpenServers,
+    required this.personalMode,
+    required this.modeSelectionEnabled,
     required this.engine,
     required this.showDestination,
     required this.reducedMotion,
@@ -1625,6 +1634,10 @@ class _HomePage extends StatelessWidget {
   final bool? poolTelegramVerified;
   final bool poolSearching;
   final VoidCallback onUseAutomaticPool;
+  final VoidCallback onUsePersonalProfile;
+  final VoidCallback onOpenServers;
+  final bool personalMode;
+  final bool modeSelectionEnabled;
   final VpnEngine engine;
   final bool showDestination;
   final bool reducedMotion;
@@ -1671,7 +1684,16 @@ class _HomePage extends StatelessWidget {
                 )),
         const SizedBox(height: 6),
         const LocalizedText('A clean route, on your terms.', style: TextStyle(color: _muted, fontSize: 14)),
-        const SizedBox(height: 28),
+        const SizedBox(height: 18),
+        _ConnectionModeSelector(
+          personalMode: personalMode,
+          enabled: modeSelectionEnabled,
+          onUseAutomaticPool: onUseAutomaticPool,
+          onUsePersonalProfile: onUsePersonalProfile,
+          onOpenServers: onOpenServers,
+          hasPersonalProfile: profile != null,
+        ),
+        const SizedBox(height: 20),
         Center(
           child: _PowerOrb(
             reducedMotion: reducedMotion,
@@ -1849,6 +1871,93 @@ class _HomePage extends StatelessWidget {
         const Center(child: LocalizedText('Source: Telegram @V2rayAG  ·  Developer: HashtagAlireza',
             textAlign: TextAlign.center, style: TextStyle(fontSize: 10, color: _muted))),
       ],
+    );
+  }
+}
+
+class _ConnectionModeSelector extends StatelessWidget {
+  const _ConnectionModeSelector({
+    required this.personalMode,
+    required this.enabled,
+    required this.onUseAutomaticPool,
+    required this.onUsePersonalProfile,
+    required this.onOpenServers,
+    required this.hasPersonalProfile,
+  });
+
+  final bool personalMode;
+  final bool enabled;
+  final VoidCallback onUseAutomaticPool;
+  final VoidCallback onUsePersonalProfile;
+  final VoidCallback onOpenServers;
+  final bool hasPersonalProfile;
+
+  @override
+  Widget build(BuildContext context) {
+    final dark = Theme.of(context).brightness == Brightness.dark;
+    final border = dark ? Colors.white12 : const Color(0xFFE4E9E5);
+    return Container(
+      decoration: BoxDecoration(
+        color: dark ? const Color(0xFF151F1C) : Colors.white,
+        borderRadius: BorderRadius.circular(18),
+        border: Border.all(color: border),
+      ),
+      padding: const EdgeInsets.all(12),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const LocalizedText(
+            'CONNECTION MODE',
+            style: TextStyle(fontSize: 10, letterSpacing: 1.3, fontWeight: FontWeight.w800, color: _muted),
+          ),
+          const SizedBox(height: 9),
+          SegmentedButton<bool>(
+            showSelectedIcon: false,
+            style: const ButtonStyle(visualDensity: VisualDensity.compact),
+            segments: const [
+              ButtonSegment<bool>(
+                value: false,
+                icon: Icon(Icons.auto_awesome_rounded, size: 17),
+                label: LocalizedText('Automatic'),
+              ),
+              ButtonSegment<bool>(
+                value: true,
+                icon: Icon(Icons.key_rounded, size: 17),
+                label: LocalizedText('Personal'),
+              ),
+            ],
+            selected: <bool>{personalMode},
+            onSelectionChanged: enabled
+                ? (selection) {
+                    if (selection.isEmpty) return;
+                    if (selection.single) {
+                      onUsePersonalProfile();
+                    } else {
+                      onUseAutomaticPool();
+                    }
+                  }
+                : null,
+          ),
+          const SizedBox(height: 7),
+          LocalizedText(
+            personalMode
+                ? 'Use a server or subscription you imported.'
+                : 'Connect automatically using the supplied server pool.',
+            style: const TextStyle(fontSize: 11, color: _muted),
+          ),
+          if (personalMode) ...[
+            const SizedBox(height: 2),
+            Align(
+              alignment: AlignmentDirectional.centerEnd,
+              child: TextButton.icon(
+                onPressed: enabled ? onOpenServers : null,
+                icon: const Icon(Icons.dns_outlined, size: 16),
+                label: LocalizedText(hasPersonalProfile ? 'Choose a personal server' : 'Import or choose a server'),
+              ),
+            ),
+          ],
+        ],
+      ),
     );
   }
 }
