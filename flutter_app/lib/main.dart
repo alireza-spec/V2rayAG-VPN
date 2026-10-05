@@ -232,6 +232,7 @@ class _VpnShellState extends State<VpnShell> {
   final Completer<void> _subscriptionsReady = Completer<void>();
   final Completer<void> _profilesReady = Completer<void>();
   final Completer<void> _routingPreferencesReady = Completer<void>();
+  final Completer<void> _connectionPreferencesReady = Completer<void>();
   Future<void> _profileWriteQueue = Future<void>.value();
   bool _profileRestoreFailed = false;
   String? _profileStorageErrorCode;
@@ -473,6 +474,10 @@ class _VpnShellState extends State<VpnShell> {
       }
     } on Object {
       // Automatic pool mode is the safe default when preferences are unavailable.
+    } finally {
+      if (!_connectionPreferencesReady.isCompleted) {
+        _connectionPreferencesReady.complete();
+      }
     }
   }
 
@@ -713,6 +718,11 @@ class _VpnShellState extends State<VpnShell> {
       }
       return;
     }
+
+    // Do not let a fast first tap connect using the temporary Auto default
+    // before the user's saved protocol has been restored from preferences.
+    await _connectionPreferencesReady.future;
+    if (!mounted) return;
 
     final profile = _useManualProfile && _selectedIndex != null &&
             _selectedIndex! < _profiles.length
