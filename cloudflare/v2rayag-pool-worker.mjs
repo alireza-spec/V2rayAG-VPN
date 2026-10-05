@@ -2,6 +2,8 @@ const MAX_BODY = 512 * 1024;
 const MAX_SUB_BYTES = 2 * 1024 * 1024;
 const MAX_IMPORT = 100;
 const REFRESH_BATCH = 10;
+const POOL_STATE_TTL_MS = 5 * 60 * 1000;
+const POOL_REFRESH_LOCK_MS = 30 * 1000;
 const SUB_PREFIX = "sub:";
 const PROFILE_PREFIX = "profile:";
 const LEASE_PREFIX = "lease:";
@@ -45,24 +47,73 @@ function shuffle(array) { for (let i = array.length - 1; i > 0; i--) { const j =
 async function digest(text) { const bytes = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text)); return [...new Uint8Array(bytes)].map(x => x.toString(16).padStart(2, "0")).join("").slice(0, 24); }
 async function sha256Hex(text) { const bytes = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text)); return [...new Uint8Array(bytes)].map(x => x.toString(16).padStart(2, "0")).join(""); }
 function randomToken() { const bytes = crypto.getRandomValues(new Uint8Array(32)); return [...bytes].map(x => x.toString(16).padStart(2, "0")).join(""); }
+function d1Changes(result) { return Number(result?.meta?.changes ?? result?.changes ?? 0); }
+function parseJsonObject(text) { try { const value = JSON.parse(text); return value && typeof value === "object" ? value : null; } catch { return null; } }
+async function readD1SubscriptionState(env, subId) {
+  if (!env.APP_DB) return null;
+  const row = await env.APP_DB.prepare("SELECT state_json, checked_at FROM pool_subscription_state WHERE sub_id = ?").bind(subId).first();
+  return row ? { ...(parseJsonObject(row.state_json) || {}), checkedAt: Number(row.checked_at || 0) } : null;
+}
+async function writeD1SubscriptionState(env, subId, state) {
+  const checkedAt = Number(state.checkedAt || Date.now());
+  await env.APP_DB.prepare("INSERT INTO pool_subscription_state (sub_id, state_json, checked_at) VALUES (?, ?, ?) ON CONFLICT(sub_id) DO UPDATE SET state_json = excluded.state_json, checked_at = excluded.checked_at")
+    .bind(subId, JSON.stringify(state), checkedAt).run();
+}
+async function ensurePoolSubscriptionsMigrated(env) {
+  if (!env.APP_DB) throw new Error("D1 storage is unavailable");
+  const marker = await env.APP_DB.prepare("SELECT value FROM app_meta WHERE key = ?").bind("pool_subscriptions_v1").first();
+  if (marker?.value === "done") return;
+  let cursor;
+  do {
+    const page = await env.POOL.list({ prefix:SUB_PREFIX, limit:1000, ...(cursor ? {cursor} : {}) });
+    const records = (await Promise.all(page.keys.map(key=>env.POOL.get(key.name,"json")))).filter(Boolean);
+    const statements = records.map(rec => env.APP_DB.prepare("INSERT OR IGNORE INTO pool_subscriptions (sub_id, record_json) VALUES (?, ?)").bind(rec.id, JSON.stringify(rec)));
+    for (let i=0;i<statements.length;i+=100) await env.APP_DB.batch(statements.slice(i,i+100));
+    if (page.list_complete) break;
+    cursor = page.cursor || undefined;
+  } while (cursor);
+  await env.APP_DB.prepare("INSERT INTO app_meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value").bind("pool_subscriptions_v1","done").run();
+}
+async function readD1Profile(env, profileId) {
+  if (env.APP_DB) {
+    const row = await env.APP_DB.prepare("SELECT profile_id, sub_id, uri FROM pool_profiles WHERE profile_id = ?").bind(profileId).first();
+    if (row) return { id: row.profile_id, subId: row.sub_id, uri: row.uri };
+  }
+  return env.POOL.get(PROFILE_PREFIX + profileId, "json");
+}
+async function deleteD1BySub(env, table, subId) {
+  if (!env.APP_DB) return 0;
+  if (!new Set(["pool_profiles", "pool_subscription_state", "app_leases", "pool_refresh_locks"]).has(table)) throw new Error("Invalid D1 table");
+  return d1Changes(await env.APP_DB.prepare(`DELETE FROM ${table} WHERE sub_id = ?`).bind(subId).run());
+}
+async function deleteD1ByDevice(env, deviceHash) {
+  if (!env.APP_DB) return 0;
+  return d1Changes(await env.APP_DB.prepare("DELETE FROM app_leases WHERE device_hash = ?").bind(deviceHash).run());
+}
 async function authenticateDevice(request, env) {
   const authorization = request.headers.get("authorization") || "";
   const token = authorization.startsWith("Bearer ") ? authorization.slice(7).trim() : "";
   if (!/^[0-9a-f]{64}$/i.test(token)) return null;
   const hash = await sha256Hex(token.toLowerCase());
+  if (env.APP_DB) {
+    const row = await env.APP_DB.prepare("SELECT record_json FROM app_devices WHERE device_hash = ?").bind(hash).first();
+    const record = row ? parseJsonObject(row.record_json) : null;
+    if (record?.active === true) return { hash, record, storage: "d1" };
+  }
+  // Backward compatibility: existing manually issued and previously enrolled
+  // devices remain valid in KV while new app enrollments use D1.
   const record = await env.POOL.get(DEVICE_PREFIX + hash, "json");
-  return record?.active === true ? { hash, record } : null;
+  return record?.active === true ? { hash, record, storage: "kv" } : null;
 }
 async function enrollAppDevice(request, env) {
-  // Enrollment and lease requests have no application-defined per-device or
-  // shared-IP cadence cap; Cloudflare and upstream provider quotas still apply.
   await parseBody(request); // Require a small JSON POST; do not accept enrollment via navigation or GET.
+  if (!env.APP_DB) return json({ success:false, error:"Device storage is temporarily unavailable. Please retry." }, 503);
   const token = randomToken();
   const hash = await sha256Hex(token);
-  await env.POOL.put(DEVICE_PREFIX + hash, JSON.stringify({
-    name:"V2rayAG app (automatic)", active:true, autoProvisioned:true,
-    createdAt:Date.now(), lastUsedAt:null,
-  }));
+  const createdAt = Date.now();
+  const record = { name:"V2rayAG app (automatic)", active:true, autoProvisioned:true, createdAt, lastUsedAt:null };
+  await env.APP_DB.prepare("INSERT INTO app_devices (device_hash, record_json, created_at, active) VALUES (?, ?, ?, 1)")
+    .bind(hash, JSON.stringify(record), createdAt).run();
   return json({ success:true, token });
 }
 function constantTimeEqual(a, b) { if (a.length !== b.length) return false; let diff = 0; for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i); return diff === 0; }
@@ -130,29 +181,55 @@ async function fetchSubscription(url) {
   const status = usage.expired ? "expired" : usage.exhausted ? "exhausted" : !usage.quotaKnown ? "unknown_quota" : uris.length ? "active" : "no_configs";
   return { usage, uris, status };
 }
-async function refreshRecord(env, rec) {
+async function refreshRecord(env, rec, { force = false } = {}) {
+  if (!env.APP_DB) throw new Error("D1 storage is unavailable");
+  const cachedState = await readD1SubscriptionState(env, rec.id);
+  const cached = cachedState ? { ...rec, ...cachedState } : rec;
+  const now = Date.now();
+  if (!force && cachedState && now - Number(cachedState.checkedAt || 0) < POOL_STATE_TTL_MS) return cached;
+
+  let lockAcquired = false;
+  if (cachedState) {
+    const lock = await env.APP_DB.prepare("INSERT INTO pool_refresh_locks (sub_id, locked_until) VALUES (?, ?) ON CONFLICT(sub_id) DO UPDATE SET locked_until = excluded.locked_until WHERE pool_refresh_locks.locked_until <= ?")
+      .bind(rec.id, now + POOL_REFRESH_LOCK_MS, now).run();
+    lockAcquired = d1Changes(lock) > 0;
+    // Another request is refreshing the same record. Serve the last known
+    // state instead of stampeding the provider or writing duplicate rows.
+    if (!lockAcquired) return cached;
+  }
   try {
     const result = await fetchSubscription(rec.url);
-    const previousIds = new Set(rec.candidateIds || []); const ids = [];
+    const ids = [];
     for (const uri of result.uris) {
       const id = await digest(`${rec.id}\n${uri}`);
       ids.push(id);
-      if (!previousIds.has(id)) await env.POOL.put(PROFILE_PREFIX + id, JSON.stringify({ id, subId: rec.id, uri }));
+      await env.APP_DB.prepare("INSERT OR IGNORE INTO pool_profiles (profile_id, sub_id, uri) VALUES (?, ?, ?)")
+        .bind(id, rec.id, uri).run();
     }
     const { error: _oldError, ...cleanRec } = rec;
-    const next = { ...cleanRec, candidateIds: ids, configCount: ids.length, status: result.status, upload: result.usage.upload, download: result.usage.download, total: result.usage.total, quotaKnown: result.usage.quotaKnown, expiresAt: result.usage.expiresAt, checkedAt: Date.now(), domain: new URL(rec.url).hostname };
-    await env.POOL.put(SUB_PREFIX + rec.id, JSON.stringify(next));
-    return next;
+    const state = { candidateIds:ids, configCount:ids.length, status:result.status, upload:result.usage.upload, download:result.usage.download, total:result.usage.total, quotaKnown:result.usage.quotaKnown, expiresAt:result.usage.expiresAt, checkedAt:Date.now(), domain:new URL(rec.url).hostname };
+    await writeD1SubscriptionState(env, rec.id, state);
+    return { ...cleanRec, ...state };
   } catch (error) {
-    const next = { ...rec, status: "fetch_error", checkedAt: Date.now(), error: String(error?.message || "fetch failed").slice(0, 120) };
-    await env.POOL.put(SUB_PREFIX + rec.id, JSON.stringify(next));
-    return next;
+    const state = { candidateIds:cachedState?.candidateIds || rec.candidateIds || [], configCount:cachedState?.configCount ?? rec.configCount ?? 0, status:"fetch_error", upload:cachedState?.upload ?? rec.upload ?? 0, download:cachedState?.download ?? rec.download ?? 0, total:cachedState?.total ?? rec.total ?? null, quotaKnown:cachedState?.quotaKnown ?? Boolean(rec.quotaKnown), expiresAt:cachedState?.expiresAt ?? rec.expiresAt ?? null, checkedAt:Date.now(), domain:new URL(rec.url).hostname, error:String(error?.message || "fetch failed").slice(0,120) };
+    await writeD1SubscriptionState(env, rec.id, state);
+    return { ...rec, ...state };
+  } finally {
+    if (lockAcquired) {
+      // A failed lock cleanup self-expires shortly and must not turn a usable
+      // response into a Worker exception.
+      try { await env.APP_DB.prepare("DELETE FROM pool_refresh_locks WHERE sub_id = ?").bind(rec.id).run(); } catch {}
+    }
   }
 }
 async function listSubscriptions(env) {
-  const page = await env.POOL.list({ prefix: SUB_PREFIX, limit: 1000 });
-  const items = await Promise.all(page.keys.map(k => env.POOL.get(k.name, "json")));
-  return items.filter(Boolean);
+  await ensurePoolSubscriptionsMigrated(env);
+  const [subscriptions, statusRows] = await Promise.all([
+    env.APP_DB.prepare("SELECT sub_id, record_json FROM pool_subscriptions").all(),
+    env.APP_DB.prepare("SELECT sub_id, state_json, checked_at FROM pool_subscription_state").all(),
+  ]);
+  const states = new Map((statusRows.results || []).map(row => [row.sub_id, { ...(parseJsonObject(row.state_json) || {}), checkedAt:Number(row.checked_at || 0) }]));
+  return (subscriptions.results || []).map(row => parseJsonObject(row.record_json)).filter(Boolean).map(rec => states.has(rec.id) ? { ...rec, ...states.get(rec.id) } : rec);
 }
 async function deleteKeysByPrefix(env, prefix) {
   let deleted = 0;
@@ -169,33 +246,34 @@ async function deleteKeysByPrefix(env, prefix) {
 }
 async function deleteProfilesForSub(env, subId) {
   let cursor;
-  let deleted = 0;
+  let deletedKv = 0;
   do {
     const page = await env.POOL.list({ prefix: PROFILE_PREFIX, limit: 1000, ...(cursor ? { cursor } : {}) });
     const records = await Promise.all(page.keys.map(k => env.POOL.get(k.name, "json")));
     const names = page.keys.filter((_, i) => records[i]?.subId === subId).map(k => k.name);
-    for (let i = 0; i < names.length; i += 50) {
-      await Promise.all(names.slice(i, i + 50).map(name => env.POOL.delete(name)));
-    }
-    deleted += names.length;
+    for (let i = 0; i < names.length; i += 50) await Promise.all(names.slice(i, i + 50).map(name => env.POOL.delete(name)));
+    deletedKv += names.length;
     if (page.list_complete) break;
     cursor = page.cursor || undefined;
   } while (cursor);
-  return deleted;
+  const deletedD1 = await deleteD1BySub(env, "pool_profiles", subId);
+  await deleteD1BySub(env, "pool_subscription_state", subId);
+  await deleteD1BySub(env, "pool_refresh_locks", subId);
+  return deletedKv + deletedD1;
 }
 async function deleteLeasesForSub(env, subId) {
   const page = await env.POOL.list({ prefix: LEASE_PREFIX, limit: 1000 });
   const records = await Promise.all(page.keys.map(k => env.POOL.get(k.name, "json")));
   const names = page.keys.filter((_, i) => records[i]?.subId === subId).map(k => k.name);
   await Promise.all(names.map(name => env.POOL.delete(name)));
-  return names.length;
+  return names.length + await deleteD1BySub(env, "app_leases", subId);
 }
 async function deleteLeasesForDevice(env, deviceHash) {
   const page = await env.POOL.list({ prefix: LEASE_PREFIX, limit: 1000 });
   const records = await Promise.all(page.keys.map(k => env.POOL.get(k.name, "json")));
   const names = page.keys.filter((_, i) => records[i]?.deviceHash === deviceHash).map(k => k.name);
   await Promise.all(names.map(name => env.POOL.delete(name)));
-  return names.length;
+  return names.length + await deleteD1ByDevice(env, deviceHash);
 }
 function adminSummary(rec) {
   return { id: rec.id, name: rec.name, domain: rec.domain || (rec.url ? new URL(rec.url).hostname : ""), status: rec.status || "pending", configCount: rec.configCount || 0, upload: rec.upload || 0, download: rec.download || 0, total: rec.total, quotaKnown: Boolean(rec.quotaKnown), expiresAt: rec.expiresAt || null, checkedAt: rec.checkedAt || null };
@@ -208,12 +286,19 @@ async function adminApi(request, env, path) {
   if (!adminOK(request, env)) return json({ success:false, error: env.ADMIN_KEY ? "Unauthorized" : "Admin key has not been configured" }, env.ADMIN_KEY ? 401 : 503);
   if (request.method === "GET" && path === "/admin/api/devices") {
     const page = await env.POOL.list({ prefix: DEVICE_PREFIX, limit: 1000 });
-    const items = await Promise.all(page.keys.map(async key => {
+    const items = new Map();
+    for (const key of page.keys) {
       const record = await env.POOL.get(key.name, "json");
-      if (!record) return null;
-      return { id: key.name.slice(DEVICE_PREFIX.length), name: record.name, active: record.active === true, createdAt: record.createdAt || null, lastUsedAt: record.lastUsedAt || null };
-    }));
-    return json({ success:true, devices:items.filter(Boolean).sort((a,b)=>(b.createdAt||0)-(a.createdAt||0)) });
+      if (record) items.set(key.name.slice(DEVICE_PREFIX.length), { id:key.name.slice(DEVICE_PREFIX.length), name:record.name, active:record.active === true, createdAt:record.createdAt || null, lastUsedAt:record.lastUsedAt || null });
+    }
+    if (env.APP_DB) {
+      const result = await env.APP_DB.prepare("SELECT device_hash, record_json FROM app_devices").all();
+      for (const row of result.results || []) {
+        const record = parseJsonObject(row.record_json);
+        if (record) items.set(row.device_hash, { id:row.device_hash, name:record.name, active:record.active === true, createdAt:record.createdAt || null, lastUsedAt:record.lastUsedAt || null });
+      }
+    }
+    return json({ success:true, devices:[...items.values()].sort((a,b)=>(b.createdAt||0)-(a.createdAt||0)) });
   }
   if (request.method === "POST" && path === "/admin/api/devices/create") {
     const body = await parseBody(request);
@@ -232,9 +317,22 @@ async function adminApi(request, env, path) {
     const id = String(body.id || "");
     if (!/^[0-9a-f]{64}$/.test(id)) return json({ success:false, error:"Invalid device id" }, 400);
     const key = DEVICE_PREFIX + id;
+    let found = false;
+    if (env.APP_DB) {
+      const row = await env.APP_DB.prepare("SELECT record_json FROM app_devices WHERE device_hash = ?").bind(id).first();
+      const d1Record = row ? parseJsonObject(row.record_json) : null;
+      if (d1Record) {
+        found = true;
+        const revoked = { ...d1Record, active:false, revokedAt:Date.now() };
+        await env.APP_DB.prepare("UPDATE app_devices SET record_json = ?, active = 0 WHERE device_hash = ?").bind(JSON.stringify(revoked), id).run();
+      }
+    }
     const record = await env.POOL.get(key, "json");
-    if (!record) return json({ success:false, error:"Device not found" }, 404);
-    await env.POOL.put(key, JSON.stringify({ ...record, active:false, revokedAt:Date.now() }));
+    if (record) {
+      found = true;
+      await env.POOL.put(key, JSON.stringify({ ...record, active:false, revokedAt:Date.now() }));
+    }
+    if (!found) return json({ success:false, error:"Device not found" }, 404);
     const deletedLeases = await deleteLeasesForDevice(env, id);
     return json({ success:true, revoked:true, deletedLeases });
   }
@@ -246,20 +344,28 @@ async function adminApi(request, env, path) {
     const body = await parseBody(request);
     const id = String(body.id || "");
     if (!/^[0-9a-f]{24}$/.test(id)) return json({ success:false, error:"Invalid subscription id" }, 400);
-    const key = SUB_PREFIX + id;
-    const rec = await env.POOL.get(key, "json");
-    if (!rec) return json({ success:false, error:"Subscription not found" }, 404);
+    await ensurePoolSubscriptionsMigrated(env);
+    const row = await env.APP_DB.prepare("SELECT record_json FROM pool_subscriptions WHERE sub_id = ?").bind(id).first();
+    if (!row) return json({ success:false, error:"Subscription not found" }, 404);
     const deletedConfigs = await deleteProfilesForSub(env, id);
     await deleteLeasesForSub(env, id);
-    await env.POOL.delete(key);
+    await env.APP_DB.prepare("DELETE FROM pool_subscriptions WHERE sub_id = ?").bind(id).run();
+    await env.POOL.delete(SUB_PREFIX + id); // Keep rollback state aligned when KV is writable.
     return json({ success:true, deletedSubscriptions:1, deletedConfigs });
   }
   if (request.method === "POST" && path === "/admin/api/delete-all") {
     const body = await parseBody(request);
     if (body.confirm !== true) return json({ success:false, error:"Explicit confirmation is required" }, 400);
-    const deletedConfigs = await deleteKeysByPrefix(env, PROFILE_PREFIX);
+    let deletedConfigs = await deleteKeysByPrefix(env, PROFILE_PREFIX);
     const deletedSubscriptions = await deleteKeysByPrefix(env, SUB_PREFIX);
     await deleteKeysByPrefix(env, LEASE_PREFIX);
+    if (env.APP_DB) {
+      deletedConfigs += d1Changes(await env.APP_DB.prepare("DELETE FROM pool_profiles").run());
+      await env.APP_DB.prepare("DELETE FROM pool_subscriptions").run();
+      await env.APP_DB.prepare("DELETE FROM pool_subscription_state").run();
+      await env.APP_DB.prepare("DELETE FROM pool_refresh_locks").run();
+      await env.APP_DB.prepare("DELETE FROM app_leases").run();
+    }
     return json({ success:true, deletedSubscriptions, deletedConfigs });
   }
   if (request.method === "POST" && path === "/admin/api/import") {
@@ -270,57 +376,57 @@ async function adminApi(request, env, path) {
       const line = String(lines[i] || "").trim(); if (!line) continue;
       const sep = line.indexOf("|"); const name = (sep >= 0 ? line.slice(0,sep) : "").trim(); const url = (sep >= 0 ? line.slice(sep+1) : line).trim();
       if (!validPublicHttps(url)) { errors.push({ line:i+1, message:"Only public HTTPS subscription URLs are allowed" }); continue; }
-      const id = await digest(url); const key = SUB_PREFIX + id; const existing = await env.POOL.get(key, "json");
+      await ensurePoolSubscriptionsMigrated(env);
+      const id = await digest(url); const key = SUB_PREFIX + id;
+      const existing = await env.APP_DB.prepare("SELECT sub_id FROM pool_subscriptions WHERE sub_id = ?").bind(id).first();
       if (existing) { duplicates++; continue; }
       const rec = { id, name: name.slice(0,80) || `${new URL(url).hostname} ${id.slice(0,6)}`, domain:new URL(url).hostname, url, status:"pending", candidateIds:[], configCount:0, createdAt:Date.now() };
-      await env.POOL.put(key, JSON.stringify(rec)); added++;
+      await env.APP_DB.prepare("INSERT INTO pool_subscriptions (sub_id, record_json) VALUES (?, ?)").bind(id, JSON.stringify(rec)).run();
+      await env.POOL.put(key, JSON.stringify(rec)); // Compatibility copy for rollback to the previous Worker.
+      added++;
     }
     return json({ success:true, added, duplicates, errors });
   }
   if (request.method === "POST" && path === "/admin/api/refresh") {
-    const body = await parseBody(request); const cursor = typeof body.cursor === "string" ? body.cursor : undefined; const limit = Math.max(1, Math.min(REFRESH_BATCH, Number(body.limit)||REFRESH_BATCH));
-    const page = await env.POOL.list({ prefix:SUB_PREFIX, limit, ...(cursor ? {cursor} : {}) });
-    const recs = await Promise.all(page.keys.map(k=>env.POOL.get(k.name,"json")));
-    const refreshed = await Promise.all(recs.filter(Boolean).map(r=>refreshRecord(env,r)));
-    return json({ success:true, checked:refreshed.length, eligible:refreshed.filter(r=>r.status==="active").length, cursor:page.list_complete?null:page.cursor||null, listComplete:Boolean(page.list_complete) });
+    const body = await parseBody(request); const offset = Math.max(0, Number.parseInt(String(body.cursor || "0"),10) || 0); const limit = Math.max(1, Math.min(REFRESH_BATCH, Number(body.limit)||REFRESH_BATCH));
+    const all = await listSubscriptions(env);
+    const recs = all.slice(offset, offset + limit);
+    const refreshed = await Promise.all(recs.map(r=>refreshRecord(env,r,{force:true})));
+    const nextOffset = offset + recs.length;
+    return json({ success:true, checked:refreshed.length, eligible:refreshed.filter(r=>r.status==="active").length, cursor:nextOffset < all.length ? String(nextOffset) : null, listComplete:nextOffset >= all.length });
   }
   return json({ success:false, error:"Not found" }, 404);
 }
 async function acquirePoolLease(request, env) {
+  if (!env.APP_DB) return json({ success:false, error:"Connection storage is temporarily unavailable. Please retry." }, 503);
   const device = await authenticateDevice(request, env);
   if (!device) return json({ success:false, error:"This app installation is not authorized. Contact support if the problem persists." }, 401);
-  await env.POOL.put(DEVICE_PREFIX + device.hash, JSON.stringify({ ...device.record, lastUsedAt:Date.now() }));
+  // Do not write last-used timestamps on every connection; this avoids hot-path KV writes.
   const body = await parseBody(request);
   const excluded = new Set(Array.isArray(body.exclude)
     ? body.exclude.filter(id => typeof id === "string" && /^[0-9a-f]{24}$/.test(id))
     : []);
   const subs = await listSubscriptions(env);
   if (!subs.length) return json({ success:false, error:"No available server is configured yet." }, 503);
-  // Refresh a bounded randomized slice. The API returns one lease only, never a catalog or batch of URIs.
+  // Status/config refreshes are persisted in D1 and cached for five minutes;
+  // no per-connection writes are made to KV.
   const fresh = await Promise.all(shuffle(subs).slice(0, REFRESH_BATCH).map(rec => refreshRecord(env, rec)));
   const active = fresh.filter(r => r.status === "active" && r.quotaKnown && r.candidateIds?.length && (!r.expiresAt || r.expiresAt * 1000 > Date.now()));
   const byId = new Map(active.map(rec => [rec.id, rec]));
   const ids = shuffle(active.flatMap(r => r.candidateIds)).filter(id => !excluded.has(id));
   for (const id of ids) {
-    const profile = await env.POOL.get(PROFILE_PREFIX + id, "json");
+    const profile = await readD1Profile(env, id);
     const sub = profile?.subId ? byId.get(profile.subId) : null;
     if (!profile?.uri || !sub) continue;
+    const now = Date.now();
     const leaseId = randomToken();
-    const lease = { subId: sub.id, profileId: id, deviceHash:device.hash, createdAt: Date.now() };
-    await env.POOL.put(LEASE_PREFIX + leaseId, JSON.stringify(lease), { expirationTtl: LEASE_TTL_SECONDS });
+    await env.APP_DB.prepare("DELETE FROM app_leases WHERE expires_at <= ?").bind(now).run();
+    await env.APP_DB.prepare("INSERT INTO app_leases (lease_id, sub_id, profile_id, device_hash, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?)")
+      .bind(leaseId, sub.id, id, device.hash, now, now + LEASE_TTL_SECONDS * 1000).run();
     return json({
       success:true,
       leaseId,
-      candidate:{
-        id,
-        uri:profile.uri,
-        subscriptionName:sub.name,
-        expiresAt:sub.expiresAt||null,
-        quotaKnown:Boolean(sub.quotaKnown),
-        upload:sub.upload||0,
-        download:sub.download||0,
-        total:sub.total,
-      },
+      candidate:{ id, uri:profile.uri, subscriptionName:sub.name, expiresAt:sub.expiresAt||null, quotaKnown:Boolean(sub.quotaKnown), upload:sub.upload||0, download:sub.download||0, total:sub.total },
       leaseExpiresInSeconds:LEASE_TTL_SECONDS,
     });
   }
@@ -332,18 +438,27 @@ async function releasePoolLease(request, env) {
   const body = await parseBody(request);
   const leaseId = typeof body.leaseId === "string" ? body.leaseId : "";
   if (!/^[0-9a-f]{64}$/.test(leaseId)) return json({ success:false, error:"Invalid lease token." }, 400);
+  if (env.APP_DB) {
+    const row = await env.APP_DB.prepare("SELECT device_hash FROM app_leases WHERE lease_id = ? AND expires_at > ?").bind(leaseId, Date.now()).first();
+    if (row) {
+      if (row.device_hash !== device.hash) return json({ success:false, error:"Lease not found" }, 404);
+      await env.APP_DB.prepare("DELETE FROM app_leases WHERE lease_id = ?").bind(leaseId).run();
+      return json({ success:true, released:true });
+    }
+  }
+  // Existing leases in KV remain releasable during rollout/expiry.
   const key = LEASE_PREFIX + leaseId;
   const existing = await env.POOL.get(key, "json");
   if (existing && existing.deviceHash !== device.hash) return json({ success:false, error:"Lease not found" }, 404);
   if (existing) await env.POOL.delete(key);
   return json({ success:true, released:Boolean(existing) });
 }
-
 export default {
   async fetch(request, env) {
+    try {
     const url = new URL(request.url); const path = url.pathname.replace(/\/$/, "") || "/";
     if (request.method === "OPTIONS") return new Response(null,{status:204,headers:{"access-control-allow-origin":"*","access-control-allow-methods":"GET,POST,OPTIONS","access-control-allow-headers":"authorization,content-type","access-control-max-age":"600"}});
-    if (path === "/healthz" && request.method === "GET") return json({ ok:true, service:"V2rayAG private pool", version:4 });
+    if (path === "/healthz" && request.method === "GET") return json({ ok:true, service:"V2rayAG private pool", version:5 });
     if (path === "/admin" && request.method === "GET") return new Response(ADMIN_HTML,{headers:{"content-type":"text/html; charset=utf-8","cache-control":"no-store","x-content-type-options":"nosniff","content-security-policy":"default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'"}});
     if (path.startsWith("/admin/api/")) {
       if (request.method !== "GET" && request.method !== "POST") return json({success:false,error:"Method not allowed"},405);
@@ -354,5 +469,8 @@ export default {
     if (path === "/v1/pool/leases" && request.method === "POST") return acquirePoolLease(request,env);
     if (path === "/v1/pool/leases/release" && request.method === "POST") return releasePoolLease(request,env);
     return json({success:false,error:"Not found"},404);
+    } catch {
+      return json({ success:false, error:"Service temporarily unavailable. Please retry." }, 503);
+    }
   }
 };
