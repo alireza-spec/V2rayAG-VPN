@@ -9,6 +9,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'app_localizations.dart';
 import 'app_preferences.dart';
 import 'cdn_fronting.dart';
+import 'cdn_scanner.dart';
 import 'exclusive_pool_service.dart';
 import 'language_preferences.dart';
 import 'subscription_service.dart';
@@ -2774,6 +2775,30 @@ class _ConnectionProtocolPageState extends State<_ConnectionProtocolPage> {
     }
   }
 
+  Future<void> _openCdnScanner({required bool scanIps}) async {
+    if (widget.locked || _saving) return;
+    final value = await showModalBottomSheet<String>(
+      context: context,
+      isScrollControlled: true,
+      useSafeArea: true,
+      backgroundColor: Theme.of(context).colorScheme.surface,
+      builder: (_) => _CdnScannerSheet(
+        scanIps: scanIps,
+        currentIps: _ipsController.text,
+        currentSni: _sniController.text,
+      ),
+    );
+    if (!mounted || value == null || value.trim().isEmpty) return;
+    setState(() {
+      if (scanIps) {
+        _ipsController.text = value;
+      } else {
+        _sniController.text = value.trim();
+      }
+      _selectedProtocol = ConnectionProtocol.cdnFronting;
+    });
+  }
+
   Widget _protocolOption({
     required ConnectionProtocol protocol,
     required String label,
@@ -2872,6 +2897,17 @@ class _ConnectionProtocolPageState extends State<_ConnectionProtocolPage> {
                         border: const OutlineInputBorder(),
                       ),
                     ),
+                    const SizedBox(height: 8),
+                    Align(
+                      alignment: AlignmentDirectional.centerEnd,
+                      child: OutlinedButton.icon(
+                        onPressed: widget.locked || _saving
+                            ? null
+                            : () => _openCdnScanner(scanIps: true),
+                        icon: const Icon(Icons.radar_rounded),
+                        label: const LocalizedText('Scan IPs'),
+                      ),
+                    ),
                     const SizedBox(height: 18),
                     const LocalizedText(
                       'CDN SNI hostname',
@@ -2887,6 +2923,17 @@ class _ConnectionProtocolPageState extends State<_ConnectionProtocolPage> {
                       decoration: InputDecoration(
                         hintText: context.tr('example.com'),
                         border: const OutlineInputBorder(),
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    Align(
+                      alignment: AlignmentDirectional.centerEnd,
+                      child: OutlinedButton.icon(
+                        onPressed: widget.locked || _saving
+                            ? null
+                            : () => _openCdnScanner(scanIps: false),
+                        icon: const Icon(Icons.domain_verification_rounded),
+                        label: const LocalizedText('Scan SNI domains'),
                       ),
                     ),
                     const SizedBox(height: 12),
@@ -2924,6 +2971,310 @@ class _ConnectionProtocolPageState extends State<_ConnectionProtocolPage> {
               textAlign: TextAlign.center,
             ),
           ],
+        ],
+      );
+}
+
+class _CdnScannerSheet extends StatefulWidget {
+  const _CdnScannerSheet({
+    required this.scanIps,
+    required this.currentIps,
+    required this.currentSni,
+  });
+
+  final bool scanIps;
+  final String currentIps;
+  final String currentSni;
+
+  @override
+  State<_CdnScannerSheet> createState() => _CdnScannerSheetState();
+}
+
+class _CdnScannerSheetState extends State<_CdnScannerSheet> {
+  bool _scanning = false;
+  bool _cancelRequested = false;
+  String? _error;
+  CdnScanReport? _report;
+  CdnScanProgress _progress = const CdnScanProgress(
+    completed: 0,
+    total: 0,
+    reachable: 0,
+    failed: 0,
+  );
+
+  Future<void> _startScan() async {
+    if (_scanning) return;
+    setState(() {
+      _scanning = true;
+      _cancelRequested = false;
+      _error = null;
+      _report = null;
+      _progress = const CdnScanProgress(completed: 0, total: 0, reachable: 0, failed: 0);
+    });
+    try {
+      final scanner = CdnEndpointScanner();
+      final report = widget.scanIps
+          ? await scanner.scanIps(
+              preferredSni: widget.currentSni,
+              isCancelled: () => _cancelRequested,
+              onProgress: (progress) {
+                if (mounted) setState(() => _progress = progress);
+              },
+            )
+          : await scanner.scanSni(
+              currentSni: widget.currentSni,
+              cdnIps: widget.currentIps,
+              isCancelled: () => _cancelRequested,
+              onProgress: (progress) {
+                if (mounted) setState(() => _progress = progress);
+              },
+            );
+      if (mounted) setState(() => _report = report);
+    } on CdnScanCancelled {
+      if (mounted) setState(() => _error = 'Scan stopped.');
+    } on FormatException catch (error) {
+      if (mounted) setState(() => _error = error.message);
+    } on Object {
+      if (mounted) setState(() => _error = 'Scan could not finish. Check the current network and try again.');
+    } finally {
+      if (mounted) setState(() => _scanning = false);
+    }
+  }
+
+  Future<void> _copy(String value) async {
+    try {
+      await Clipboard.setData(ClipboardData(text: value));
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: LocalizedText('Copied to clipboard.')),
+        );
+      }
+    } on Object {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: LocalizedText('Could not copy the result.')),
+        );
+      }
+    }
+  }
+
+  void _use(String value) => Navigator.of(context).pop(value);
+
+  List<CdnScanCandidate> get _candidates => _report?.candidates ?? const [];
+
+  String get _allValues {
+    final values = _candidates
+        .take(widget.scanIps ? 20 : 8)
+        .map((candidate) => candidate.value)
+        .toList(growable: false);
+    return values.join(widget.scanIps ? ', ' : '\n');
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = Theme.of(context).colorScheme;
+    final title = widget.scanIps ? 'Scan CDN IPs' : 'Scan SNI domains';
+    final report = _report;
+    return FractionallySizedBox(
+      heightFactor: 0.9,
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(20, 10, 20, 16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Center(
+              child: Container(
+                width: 42,
+                height: 4,
+                decoration: BoxDecoration(
+                  color: colors.outlineVariant,
+                  borderRadius: BorderRadius.circular(4),
+                ),
+              ),
+            ),
+            const SizedBox(height: 16),
+            Row(children: [
+              AnimatedContainer(
+                duration: const Duration(milliseconds: 260),
+                width: 44,
+                height: 44,
+                decoration: BoxDecoration(
+                  color: _scanning ? colors.primaryContainer : colors.surfaceContainerHighest,
+                  borderRadius: BorderRadius.circular(15),
+                ),
+                child: _scanning
+                    ? Padding(
+                        padding: const EdgeInsets.all(12),
+                        child: CircularProgressIndicator(
+                          strokeWidth: 2.5,
+                          color: colors.primary,
+                        ),
+                      )
+                    : Icon(Icons.radar_rounded, color: colors.primary),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: LocalizedText(
+                  title,
+                  style: Theme.of(context).textTheme.titleLarge?.copyWith(
+                        fontWeight: FontWeight.w800,
+                      ),
+                ),
+              ),
+              IconButton(
+                tooltip: context.tr('Close'),
+                onPressed: _scanning ? () => setState(() => _cancelRequested = true) : () => Navigator.pop(context),
+                icon: Icon(_scanning ? Icons.stop_circle_outlined : Icons.close_rounded),
+              ),
+            ]),
+            const SizedBox(height: 12),
+            const LocalizedText(
+              'Scans use this phone\'s live DNS and HTTPS/TLS on the current network. They only confirm reachability, not VPN or Meek compatibility.',
+              style: TextStyle(color: _muted, height: 1.35),
+            ),
+            const SizedBox(height: 12),
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: colors.surfaceContainerHighest.withValues(alpha: 0.55),
+                borderRadius: BorderRadius.circular(14),
+              ),
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.spaceAround,
+                children: [
+                  _ScanMetric(label: 'Scanned', value: '${_progress.completed}/${_progress.total}'),
+                  _ScanMetric(label: 'Remaining', value: '${(_progress.total - _progress.completed).clamp(0, _progress.total)}'),
+                  _ScanMetric(label: 'Reachable', value: '${_progress.reachable}'),
+                  _ScanMetric(label: 'Failed', value: '${_progress.failed}'),
+                ],
+              ),
+            ),
+            if (_scanning) ...[
+              const SizedBox(height: 12),
+              LinearProgressIndicator(
+                value: _progress.total == 0
+                    ? null
+                    : (_progress.completed / _progress.total).clamp(0.0, 1.0).toDouble(),
+                minHeight: 5,
+                borderRadius: BorderRadius.circular(4),
+              ),
+            ],
+            const SizedBox(height: 10),
+            Row(children: [
+              Expanded(
+                child: FilledButton.icon(
+                  onPressed: _scanning ? null : _startScan,
+                  icon: Icon(_scanning ? Icons.hourglass_top_rounded : Icons.radar_rounded),
+                  label: LocalizedText(_scanning ? 'Scanning…' : 'Start scan'),
+                ),
+              ),
+              const SizedBox(width: 8),
+              OutlinedButton.icon(
+                onPressed: _scanning || _candidates.isEmpty
+                    ? null
+                    : () => _copy(_allValues),
+                icon: const Icon(Icons.copy_all_rounded),
+                label: const LocalizedText('Copy all'),
+              ),
+            ]),
+            const SizedBox(height: 8),
+            if (_error != null)
+              Padding(
+                padding: const EdgeInsets.symmetric(vertical: 8),
+                child: LocalizedText(
+                  _error!,
+                  style: TextStyle(color: _error == 'Scan stopped.' ? _muted : colors.error),
+                ),
+              ),
+            if (report != null && report.candidates.isEmpty)
+              const Padding(
+                padding: EdgeInsets.symmetric(vertical: 12),
+                child: LocalizedText('No TLS-reachable candidate was found on this network.'),
+              ),
+            Expanded(
+              child: report == null || report.candidates.isEmpty
+                  ? Center(
+                      child: AnimatedSwitcher(
+                        duration: const Duration(milliseconds: 220),
+                        child: _scanning
+                            ? Column(
+                                key: const ValueKey('scan-animation'),
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  const Icon(Icons.public_rounded, size: 34, color: _muted),
+                                  const SizedBox(height: 8),
+                                  const LocalizedText('Resolving current Akamai candidates…'),
+                                ],
+                              )
+                            : const LocalizedText(
+                                'Start a scan to test Akamai candidates on this network.',
+                                key: ValueKey('scan-idle'),
+                                style: TextStyle(color: _muted),
+                                textAlign: TextAlign.center,
+                              ),
+                      ),
+                    )
+                  : ListView.separated(
+                      itemCount: report.candidates.length,
+                      separatorBuilder: (_, __) => const Divider(height: 1),
+                      itemBuilder: (context, index) {
+                        final candidate = report.candidates[index];
+                        return ListTile(
+                          dense: true,
+                          contentPadding: EdgeInsets.zero,
+                          leading: Icon(Icons.check_circle_rounded, color: colors.tertiary),
+                          title: SelectableText(candidate.value),
+                          subtitle: Text('${context.tr('TLS reachable')} · ${candidate.latencyMs} ms'),
+                          trailing: Wrap(
+                            spacing: 0,
+                            crossAxisAlignment: WrapCrossAlignment.center,
+                            children: [
+                              IconButton(
+                                tooltip: context.tr('Copy'),
+                                onPressed: () => _copy(candidate.value),
+                                icon: const Icon(Icons.copy_rounded),
+                              ),
+                              TextButton(
+                                onPressed: () => _use(candidate.value),
+                                child: const LocalizedText('Use'),
+                              ),
+                            ],
+                          ),
+                        );
+                      },
+                    ),
+            ),
+            if (report != null && report.candidates.isNotEmpty)
+              SizedBox(
+                width: double.infinity,
+                child: FilledButton.tonalIcon(
+                  onPressed: () => _use(widget.scanIps
+                      ? report.candidates.take(20).map((item) => item.value).join(', ')
+                      : report.candidates.first.value),
+                  icon: const Icon(Icons.input_rounded),
+                  label: LocalizedText(widget.scanIps ? 'Use all results' : 'Use fastest SNI'),
+                ),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _ScanMetric extends StatelessWidget {
+  const _ScanMetric({required this.label, required this.value});
+
+  final String label;
+  final String value;
+
+  @override
+  Widget build(BuildContext context) => Column(
+        children: [
+          Text(value, style: Theme.of(context).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w800)),
+          const SizedBox(height: 2),
+          LocalizedText(label, style: const TextStyle(color: _muted, fontSize: 11)),
         ],
       );
 }

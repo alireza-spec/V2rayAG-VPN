@@ -1,0 +1,32 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="432" height="432" viewBox="0 0 432 432">
+  <defs>
+    <linearGradient id="aqua" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#63F3E2"/>
+      <stop offset="0.48" stop-color="#14D7D2"/>
+      <stop offset="1" stop-color="#1B9FFF"/>
+    </linearGradient>
+    <linearGradient id="violet" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#B46BFF"/>
+      <stop offset="0.56" stop-color="#744BFF"/>
+      <stop offset="1" stop-color="#286DFF"/>
+    </linearGradient>
+    <linearGradient id="highlight" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#FFFFFF" stop-opacity=".72"/>
+      <stop offset="1" stop-color="#FFFFFF" stop-opacity="0"/>
+    </linearGradient>
+    <filter id="glow" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur stdDeviation="8"/>
+    </filter>
+  </defs>
+  <!-- soft, restrained colored aura stays inside the adaptive safe area -->
+  <path d="M89 104h65l62 62 62-62h65L216 293z" fill="#12DAD2" opacity=".22" filter="url(#glow)"/>
+  <path d="M112 267h55l49 49 49-49h55L216 375z" fill="#8454FF" opacity=".24" filter="url(#glow)"/>
+  <!-- upper forward V: bright cyan edge and deep-blue lower facet -->
+  <path d="M88 92h74l54 54 54-54h74L216 264z" fill="url(#aqua)"/>
+  <path d="M216 264 270 92h74L216 264z" fill="#1288E9" opacity=".42"/>
+  <path d="M101 101h57l58 58 58-58h58" fill="none" stroke="url(#highlight)" stroke-width="5" stroke-linecap="round" stroke-linejoin="round" opacity=".62"/>
+  <!-- lower violet chevron echoes the V and gives the launcher its signature color -->
+  <path d="M116 267h63l37 37 37-37h63L216 368z" fill="url(#violet)"/>
+  <path d="M216 368 253 267h63L216 368z" fill="#245EFF" opacity=".4"/>
+  <path d="M132 275h43l41 41 41-41h43" fill="none" stroke="#E9D9FF" stroke-width="4" stroke-linecap="round" stroke-linejoin="round" opacity=".42"/>
+</svg>
