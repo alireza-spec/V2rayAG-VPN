@@ -835,10 +835,28 @@ class _VpnShellState extends State<VpnShell> {
   }
 
   void _useAutomaticPool() {
-    if (_engine.connected || _engine.connecting || _engine.disconnecting) return;
+    if (_engine.connected || _engine.connecting || _engine.disconnecting || _poolSearching) return;
     _connectionModeChangedByUser = true;
     setState(() => _useManualProfile = false);
     unawaited(_saveConnectionMode(false));
+  }
+
+  void _usePersonalProfile() {
+    if (_engine.connected || _engine.connecting || _engine.disconnecting || _poolSearching) {
+      _showMessage('Disconnect before changing connection mode.');
+      return;
+    }
+    _connectionModeChangedByUser = true;
+    setState(() {
+      _useManualProfile = true;
+      _tab = 1;
+    });
+    unawaited(_saveConnectionMode(true));
+    if (_profiles.isEmpty) {
+      _showMessage('Import a personal server profile to use this mode.');
+    } else if (_selectedIndex == null) {
+      _showMessage('Select a personal server before connecting.');
+    }
   }
 
   Future<void> _measurePing() async {
@@ -1425,6 +1443,11 @@ class _VpnShellState extends State<VpnShell> {
       ),
       _SettingsPage(
         locale: widget.locale,
+        manualProfileMode: _useManualProfile,
+        connectionModeLocked: _engine.connected || _engine.connecting ||
+            _engine.disconnecting || _poolSearching || _subscriptionBusy,
+        onUseAutomaticPool: _useAutomaticPool,
+        onUsePersonalProfile: _usePersonalProfile,
         onLocaleChanged: widget.onLocaleChanged,
         reducedMotion: widget.reducedMotion,
         showDestination: widget.showDestination,
@@ -2301,6 +2324,10 @@ class _InstalledApp {
 class _SettingsPage extends StatelessWidget {
   const _SettingsPage({
     required this.locale,
+    required this.manualProfileMode,
+    required this.connectionModeLocked,
+    required this.onUseAutomaticPool,
+    required this.onUsePersonalProfile,
     required this.onLocaleChanged,
     required this.reducedMotion,
     required this.showDestination,
@@ -2313,6 +2340,10 @@ class _SettingsPage extends StatelessWidget {
   });
 
   final Locale locale;
+  final bool manualProfileMode;
+  final bool connectionModeLocked;
+  final VoidCallback onUseAutomaticPool;
+  final VoidCallback onUsePersonalProfile;
   final ValueChanged<Locale> onLocaleChanged;
   final bool reducedMotion;
   final bool showDestination;
@@ -2364,10 +2395,22 @@ class _SettingsPage extends StatelessWidget {
             onTap: onEditAppRouting,
           ),
           const Divider(height: 1, indent: 16, endIndent: 16),
-          const ListTile(
-            leading: Icon(Icons.auto_awesome_rounded),
-            title: LocalizedText('Automatic pool access'),
-            subtitle: LocalizedText('Connect automatically; no key setup is needed'),
+          SwitchListTile(
+            secondary: const Icon(Icons.auto_awesome_rounded),
+            title: const LocalizedText('Automatic server pool'),
+            subtitle: LocalizedText(manualProfileMode
+                ? 'Use the personal server selected in Servers.'
+                : 'Connect to candidates directly; continue only after a safely cleaned-up failure.'),
+            value: !manualProfileMode,
+            onChanged: connectionModeLocked
+                ? null
+                : (automatic) {
+                    if (automatic) {
+                      onUseAutomaticPool();
+                    } else {
+                      onUsePersonalProfile();
+                    }
+                  },
           ),
         ])),
         const SizedBox(height: 16),
