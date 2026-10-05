@@ -915,12 +915,11 @@ class _VpnShellState extends State<VpnShell> {
         }
       }
 
-      if (retainedLeaseId == null && !_cancelPoolSearch && mounted &&
-          _engine.message == null) {
+      if (retainedLeaseId == null && !_cancelPoolSearch && mounted) {
         if (cdnOverridesActive && sawCdnIncompatibleCandidate &&
             !sawCdnCompatibleCandidate) {
           _showMessage('CDN Fronting needs an automatic server using TLS WebSocket.');
-        } else {
+        } else if (_engine.message == null) {
           _showMessage('Could not connect to an available server. Please try again later.');
         }
       }
