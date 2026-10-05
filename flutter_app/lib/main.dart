@@ -3181,6 +3181,7 @@ class _CdnScannerSheetState extends State<_CdnScannerSheet> {
     completed: 0,
     total: 0,
     reachable: 0,
+    tcpReachable: 0,
     failed: 0,
   );
 
