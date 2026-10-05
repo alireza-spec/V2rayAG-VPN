@@ -135,7 +135,10 @@ void main() {
         () => applyCdnFrontingOverrides('{"outbounds":[]} ', sniHostname: 'edge.example.net'),
         throwsA(isA<CdnProfileNotSupportedException>()),
       );
-      expect(() => applyCdnFrontingOverrides('{invalid'), throwsFormatException);
+      expect(
+        () => applyCdnFrontingOverrides('{invalid', cdnIp: '1.1.1.1'),
+        throwsFormatException,
+      );
       expect(() => applyCdnFrontingOverrides(
         '{"outbounds":[{"protocol":"vless","settings":{"vnext":[{"address":"1.1.1.1"}]},"streamSettings":{"network":"ws","security":"tls","wsSettings":{}}}]}',
         cdnIp: '1.0.0.1',
