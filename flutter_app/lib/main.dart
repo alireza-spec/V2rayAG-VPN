@@ -28,18 +28,6 @@ const _canvas = Color(0xFFF6F7F3);
 
 enum _SubscriptionSaveChoice { saved, useOnce, cancelled }
 
-class _PoolCandidateProbe {
-  const _PoolCandidateProbe({
-    required this.lease,
-    required this.latencyMs,
-    required this.telegramResponsive,
-  });
-
-  final ExclusivePoolLease lease;
-  final int? latencyMs;
-  final bool telegramResponsive;
-}
-
 /// Keep the connection control available to stop an orphaned native VPN
 /// session even when secure storage could not restore its selected profile.
 bool canToggleVpnAction({
@@ -692,10 +680,13 @@ class _VpnShellState extends State<VpnShell> {
       _showMessage('The VPN engine is not ready yet. Try again in a moment.');
       return;
     }
-    // Keep searching until the Worker reports exhaustion or the user cancels;
-    // there is no app-imposed per-attempt candidate ceiling.
+
+    // Acquire one lease, try the real native tunnel immediately, then move to
+    // the next distinct profile only after Android safely cleans up a failure.
+    // A standalone latency probe is diagnostic only; it must never gate a real
+    // connection or delay the first usable candidate.
     final triedIds = <String>{};
-    final probes = <_PoolCandidateProbe>[];
+    String? currentLeaseId;
     String? retainedLeaseId;
     _activePoolLeaseId = null;
     setState(() {
@@ -707,55 +698,43 @@ class _VpnShellState extends State<VpnShell> {
       _activePoolTelegramVerified = null;
     });
     unawaited(_persistPoolSummary(null));
-    _PoolCandidateProbe? bestNativeOnlyFallback;
+
     try {
       while (!_cancelPoolSearch) {
         late final ExclusivePoolLease lease;
         try {
           lease = await _exclusivePool.acquireLease(excludeIds: triedIds);
         } on PoolCandidatesUnavailableException {
-          // Normal exhaustion: use the candidates already probed rather than
-          // turning the last empty response into a failed connection attempt.
           break;
         }
+        currentLeaseId = lease.leaseId;
         if (!triedIds.add(lease.candidate.id)) {
           await _exclusivePool.releaseLease(lease.leaseId);
+          currentLeaseId = null;
           break;
         }
-        final latency = await _engine.measurePing(
-          lease.candidate.profile,
-          automaticSelection: true,
-        );
-        probes.add(_PoolCandidateProbe(
-          lease: lease,
-          latencyMs: latency,
-          telegramResponsive: latency != null && _engine.lastPingWasTelegram,
-        ));
-      }
-      probes.sort((a, b) => compareAutomaticCandidate(
-            leftTelegramResponsive: a.telegramResponsive,
-            leftMs: a.latencyMs,
-            rightTelegramResponsive: b.telegramResponsive,
-            rightMs: b.latencyMs,
-          ));
+        if (_cancelPoolSearch) {
+          await _exclusivePool.releaseLease(lease.leaseId);
+          currentLeaseId = null;
+          break;
+        }
 
-      for (final probe in probes) {
-        if (_cancelPoolSearch) break;
-        final candidate = probe.lease.candidate;
+        final candidate = lease.candidate;
         final connected = await _engine.connect(
           candidate.profile,
           blockedApps: _excludedPackages.toList(growable: false),
         );
+
         if (_cancelPoolSearch) {
           // A cancel can arrive while Android's permission sheet or start
-          // handshake is open. Reconcile native state before releasing its
-          // lease or allowing another route to start.
+          // handshake is open. Do not release the lease until native state is
+          // reconciled; never start another route over an uncertain tunnel.
           if (_engine.connected || _engine.connecting || _engine.disconnecting) {
             final stopped = await _engine.disconnect();
             if (!stopped &&
                 (_engine.connected || _engine.connecting || _engine.disconnecting)) {
-              retainedLeaseId = probe.lease.leaseId;
-              _activePoolLeaseId = probe.lease.leaseId;
+              retainedLeaseId = lease.leaseId;
+              _activePoolLeaseId = lease.leaseId;
               _activePoolProfile = candidate.profile;
               if (mounted) {
                 setState(() {
@@ -767,115 +746,78 @@ class _VpnShellState extends State<VpnShell> {
               }
             }
           }
+          if (retainedLeaseId == null) {
+            await _exclusivePool.releaseLease(lease.leaseId);
+            currentLeaseId = null;
+          }
           break;
         }
-        if (!connected) {
-          if (_cancelPoolSearch ||
-              !shouldRetrySubscriptionProfile(_engine.failureCategory) ||
-              !_engine.canStart || _engine.busy || _engine.connected ||
-              _engine.connecting || _engine.disconnecting) {
-            if (!_cancelPoolSearch && mounted && _engine.message != null) {
-              _showMessage(_engine.message!);
-            }
-            break;
-          }
-          continue;
-        }
 
-        // Prefer an active path that answers Telegram's own HTTPS endpoint;
-        // a low generic web delay alone does not show that Telegram is routed.
-        final activeLatency = await _engine.measurePing(
-          candidate.profile,
-          telegramOnly: true,
-        );
-        if (_cancelPoolSearch) break;
-        if (activeLatency == null) {
-          // Keep a separately measured general route as a last-resort fallback
-          // if none of the sampled nodes can answer the Telegram probe.
-          final fallbackLatency = await _engine.measurePing(
-            candidate.profile,
-            fallbackOnly: true,
-          );
-          if (_cancelPoolSearch) break;
-          final fallbackProbe = _PoolCandidateProbe(
-            lease: probe.lease,
-            latencyMs: fallbackLatency ?? probe.latencyMs,
-            telegramResponsive: false,
-          );
-          if (bestNativeOnlyFallback == null ||
-              compareMeasuredLatency(
-                    fallbackProbe.latencyMs,
-                    bestNativeOnlyFallback.latencyMs,
-                  ) <
-                  0) {
-            bestNativeOnlyFallback = fallbackProbe;
-          }
-          final stopped = await _engine.disconnect();
-          if (!stopped) {
-            // Preserve a tunnel Android has not confirmed it can stop; never
-            // start a second profile on top of a possibly-live TUN.
-            if (_engine.connected && mounted) {
-              retainedLeaseId = probe.lease.leaseId;
-              _activePoolLeaseId = probe.lease.leaseId;
-              _activePoolProfile = candidate.profile;
-              setState(() {
-                _activePoolSummary = candidate.summary;
-                _activePoolPingChecked = true;
-                _activePoolTelegramVerified = false;
-              });
-              unawaited(_persistPoolSummary(candidate.summary));
-            } else if (mounted && _engine.message != null) {
-              _showMessage(_engine.message!);
-            }
-            break;
-          }
-          continue;
-        }
-
-        retainedLeaseId = probe.lease.leaseId;
-        _activePoolLeaseId = probe.lease.leaseId;
-        _activePoolProfile = candidate.profile;
-        if (mounted) {
-          setState(() {
-            _activePoolSummary = candidate.summary;
-            _activePoolPingChecked = true;
-            _activePoolTelegramVerified = true;
-          });
-          unawaited(_persistPoolSummary(candidate.summary));
-        }
-        return;
-      }
-
-      // If none of the connected candidates produced a ping response, keep one
-      // best-ranked native tunnel as a clearly unverified fallback rather than
-      // falsely claiming the sampled pool was usable or leaving no route up.
-      if (retainedLeaseId == null && bestNativeOnlyFallback != null &&
-          !_cancelPoolSearch && _engine.canStart) {
-        final fallback = bestNativeOnlyFallback;
-        final candidate = fallback.lease.candidate;
-        final connected = await _engine.connect(
-          candidate.profile,
-          blockedApps: _excludedPackages.toList(growable: false),
-        );
         if (connected) {
-          retainedLeaseId = fallback.lease.leaseId;
-          _activePoolLeaseId = fallback.lease.leaseId;
+          // Native connection confirmation owns the session. A blocked third-
+          // party ping endpoint is shown as inconclusive, never as a reason to
+          // tear down a working tunnel or rotate to another profile.
+          retainedLeaseId = lease.leaseId;
+          currentLeaseId = null;
+          _activePoolLeaseId = lease.leaseId;
           _activePoolProfile = candidate.profile;
-          // Show the real fallback probe latency if available; otherwise the
-          // UI will honestly keep the ping state inconclusive.
-          await _engine.measurePing(candidate.profile, fallbackOnly: true);
           if (mounted) {
             setState(() {
               _activePoolSummary = candidate.summary;
-              _activePoolPingChecked = true;
-              _activePoolTelegramVerified = false;
+              _activePoolPingChecked = false;
+              _activePoolTelegramVerified = null;
             });
             unawaited(_persistPoolSummary(candidate.summary));
           }
+          final latency = await _engine.measurePing(
+            candidate.profile,
+            telegramOnly: true,
+          );
+          if (mounted) {
+            setState(() {
+              _activePoolPingChecked = true;
+              _activePoolTelegramVerified = latency != null &&
+                  _engine.lastPingWasTelegram;
+            });
+          }
           return;
         }
+
+        if (_engine.connected || _engine.connecting || _engine.disconnecting) {
+          // A native start that did not settle cleanly still owns its lease.
+          // Keep the current profile visible and block further automatic starts.
+          retainedLeaseId = lease.leaseId;
+          currentLeaseId = null;
+          _activePoolLeaseId = lease.leaseId;
+          _activePoolProfile = candidate.profile;
+          if (mounted) {
+            setState(() {
+              _activePoolSummary = candidate.summary;
+              _activePoolPingChecked = false;
+              _activePoolTelegramVerified = null;
+            });
+            unawaited(_persistPoolSummary(candidate.summary));
+          }
+          if (_engine.message != null && mounted) {
+            _showMessage(_engine.message!);
+          }
+          break;
+        }
+
+        await _exclusivePool.releaseLease(lease.leaseId);
+        currentLeaseId = null;
+        if (!shouldRetrySubscriptionProfile(_engine.failureCategory) ||
+            !_engine.canStart || _engine.busy || _engine.connected ||
+            _engine.connecting || _engine.disconnecting) {
+          if (_engine.message != null && mounted) {
+            _showMessage(_engine.message!);
+          }
+          break;
+        }
       }
-      if (retainedLeaseId == null && !_cancelPoolSearch && mounted) {
+
+      if (retainedLeaseId == null && !_cancelPoolSearch && mounted &&
+          _engine.message == null) {
         _showMessage('Could not connect to an available server. Please try again later.');
       }
     } on FormatException catch (error) {
@@ -885,11 +827,9 @@ class _VpnShellState extends State<VpnShell> {
         _showMessage('Could not reach the secure server pool. Check your internet and try again.');
       }
     } finally {
-      await Future.wait(
-        probes
-            .where((probe) => probe.lease.leaseId != retainedLeaseId)
-            .map((probe) => _exclusivePool.releaseLease(probe.lease.leaseId)),
-      );
+      if (currentLeaseId != null && currentLeaseId != retainedLeaseId) {
+        await _exclusivePool.releaseLease(currentLeaseId);
+      }
       if (mounted) setState(() => _poolSearching = false);
     }
   }
@@ -970,6 +910,27 @@ class _VpnShellState extends State<VpnShell> {
           ),
         ],
       ),
+    );
+  }
+
+  void _showAbout() {
+    showAboutDialog(
+      context: context,
+      applicationName: 'V2rayAG',
+      applicationVersion: '0.1.0',
+      applicationIcon: const _BrandMark(size: 48),
+      applicationLegalese: 'Android VPN client · V2rayAG · HashtagAlireza',
+      children: [
+        const SizedBox(height: 8),
+        const LocalizedText(
+          'Manage imported server links and subscriptions, choose a route, and inspect connection diagnostics. Unsupported tunnel features are not presented as working controls.',
+          style: TextStyle(fontSize: 13),
+        ),
+        if (_engine.coreVersion != null) ...[
+          const SizedBox(height: 8),
+          Text('VPN core: ${_engine.coreVersion}', style: const TextStyle(fontSize: 12)),
+        ],
+      ],
     );
   }
 
@@ -1477,7 +1438,96 @@ class _VpnShellState extends State<VpnShell> {
     ];
 
     return Scaffold(
+      drawer: Drawer(
+        child: SafeArea(
+          child: ListView(
+            padding: EdgeInsets.zero,
+            children: [
+              DrawerHeader(
+                decoration: BoxDecoration(
+                  color: Theme.of(context).colorScheme.surface,
+                ),
+                child: Row(
+                  children: [
+                    const _BrandMark(size: 48),
+                    const SizedBox(width: 12),
+                    Column(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        const LocalizedText(
+                          'V2rayAG',
+                          style: TextStyle(fontSize: 20, fontWeight: FontWeight.w800),
+                        ),
+                        const SizedBox(height: 4),
+                        Text(
+                          _engine.connected
+                              ? context.tr('CONNECTED')
+                              : context.tr('NOT CONNECTED'),
+                          style: const TextStyle(fontSize: 11, color: _muted),
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
+              ),
+              ListTile(
+                leading: const Icon(Icons.radio_button_checked_rounded),
+                title: const LocalizedText('Connect'),
+                selected: _tab == 0,
+                onTap: () {
+                  Navigator.of(context).pop();
+                  setState(() => _tab = 0);
+                },
+              ),
+              ListTile(
+                leading: const Icon(Icons.public_rounded),
+                title: const LocalizedText('Servers'),
+                selected: _tab == 1,
+                onTap: () {
+                  Navigator.of(context).pop();
+                  setState(() => _tab = 1);
+                },
+              ),
+              ListTile(
+                leading: const Icon(Icons.tune_rounded),
+                title: const LocalizedText('Settings'),
+                selected: _tab == 2,
+                onTap: () {
+                  Navigator.of(context).pop();
+                  setState(() => _tab = 2);
+                },
+              ),
+              const Divider(indent: 16, endIndent: 16),
+              ListTile(
+                leading: const Icon(Icons.bug_report_outlined),
+                title: const LocalizedText('Diagnostics & logs'),
+                subtitle: const LocalizedText('Local connection status and safe diagnostics'),
+                onTap: () {
+                  Navigator.of(context).pop();
+                  unawaited(_showConnectionDiagnostics());
+                },
+              ),
+              ListTile(
+                leading: const Icon(Icons.info_outline_rounded),
+                title: const LocalizedText('About'),
+                onTap: () {
+                  Navigator.of(context).pop();
+                  _showAbout();
+                },
+              ),
+            ],
+          ),
+        ),
+      ),
       appBar: AppBar(
+        leading: Builder(
+          builder: (context) => IconButton(
+            tooltip: context.tr('Open navigation menu'),
+            onPressed: () => Scaffold.of(context).openDrawer(),
+            icon: const Icon(Icons.menu_rounded),
+          ),
+        ),
         titleSpacing: 20,
         title: Row(
           children: [
@@ -1566,6 +1616,7 @@ class _HomePage extends StatelessWidget {
     final card = dark ? const Color(0xFF192321) : Colors.white;
     final activeOrPending = engine.connected || engine.connecting || engine.disconnecting || poolSearching;
     final candidate = poolSummary;
+    final visibleLatencyMs = engine.latencyForProfile(profile);
     final poolConnected = candidate != null && engine.connected;
     final poolRouteLabel = poolConnected
         ? '${candidate.subscriptionName} · ${candidate.configurationName}'
@@ -1759,8 +1810,8 @@ class _HomePage extends StatelessWidget {
                       : onMeasurePing,
                   icon: const Icon(Icons.speed_rounded, size: 17),
                   label: LocalizedText(
-                    engine.lastPingMs != null
-                        ? '${engine.lastPingMs} ms'
+                    visibleLatencyMs != null
+                        ? '$visibleLatencyMs ms'
                         : poolConnected && poolPingChecked
                             ? 'No ping response'
                             : 'Test latency',

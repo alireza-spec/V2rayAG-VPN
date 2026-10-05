@@ -36,6 +36,50 @@ void main() {
     });
   });
 
+  group('latency display state', () {
+    test('does not show a stale probe when disconnected without a profile', () {
+      expect(
+        visibleLatencyMs(
+          latencyMs: 623,
+          connected: false,
+          hasProfile: false,
+          profileMatches: false,
+        ),
+        isNull,
+      );
+    });
+
+    test('shows a result for the current profile or active tunnel only', () {
+      expect(
+        visibleLatencyMs(
+          latencyMs: 48,
+          connected: false,
+          hasProfile: true,
+          profileMatches: true,
+        ),
+        48,
+      );
+      expect(
+        visibleLatencyMs(
+          latencyMs: 48,
+          connected: false,
+          hasProfile: true,
+          profileMatches: false,
+        ),
+        isNull,
+      );
+      expect(
+        visibleLatencyMs(
+          latencyMs: 48,
+          connected: true,
+          hasProfile: false,
+          profileMatches: false,
+        ),
+        48,
+      );
+    });
+  });
+
   group('automatic pool latency ranking', () {
     test('prefers lower measured delay and leaves inconclusive probes last', () {
       final values = <int?>[null, 92, 48, null, 310];

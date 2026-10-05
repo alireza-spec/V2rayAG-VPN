@@ -52,14 +52,25 @@ int compareAutomaticCandidate({
   return compareMeasuredLatency(leftMs, rightMs);
 }
 
+/// Do not show a disconnected latency value after its profile has been
+/// removed or replaced. A live connected-session measurement remains valid.
+int? visibleLatencyMs({
+  required int? latencyMs,
+  required bool connected,
+  required bool hasProfile,
+  required bool profileMatches,
+}) {
+  if (latencyMs == null) return null;
+  return connected || (hasProfile && profileMatches) ? latencyMs : null;
+}
+
 /// Android VPN bridge. Other platforms deliberately remain disabled until their
 /// native projects and signing/entitlement setup are added and tested.
 class VpnEngine extends ChangeNotifier {
   late final FlutterVless _client = FlutterVless(onStatusChanged: _onStatus);
 
-  // The automatic selector checks a Telegram-owned HTTPS endpoint first so
-  // that networks with general web access but a blocked Telegram route do not
-  // keep preferring a server that cannot carry the user's target traffic.
+  // The route diagnostic checks Telegram-owned HTTPS endpoints first so a
+  // generic web delay is never presented as proof that Telegram is reachable.
   static const _telegramProbeUrls = <String>[
     'https://api.telegram.org/',
     'https://telegram.org/',
@@ -93,6 +104,7 @@ class VpnEngine extends ChangeNotifier {
   String _phase = 'idle';
   int? _lastPingMs;
   String? _lastPingTarget;
+  String? _lastPingConfig;
   Completer<bool>? _connectResult;
   Completer<void>? _disconnectResult;
   Stopwatch? _sessionClock;
@@ -113,6 +125,12 @@ class VpnEngine extends ChangeNotifier {
   String? get failureCategory => _failureCategory;
   int? get lastPingMs => _lastPingMs;
   bool get lastPingWasTelegram => _lastPingTarget?.contains('telegram.org') ?? false;
+  int? latencyForProfile(VpnProfile? profile) => visibleLatencyMs(
+        latencyMs: _lastPingMs,
+        connected: connected,
+        hasProfile: profile != null,
+        profileMatches: profile != null && profile.config == _lastPingConfig,
+      );
   int get sessionUploadBytes => _sessionUpload;
   int get sessionDownloadBytes => _sessionDownload;
 
@@ -219,6 +237,7 @@ class VpnEngine extends ChangeNotifier {
     _lastNativeDownload = 0;
     _lastPingMs = null;
     _lastPingTarget = null;
+    _lastPingConfig = null;
   }
 
   void _recordTraffic(VlessStatus next) {
@@ -356,6 +375,7 @@ class VpnEngine extends ChangeNotifier {
     _message = null;
     _lastPingMs = null;
     _lastPingTarget = null;
+    _lastPingConfig = null;
     final result = Completer<bool>();
     _connectResult = result;
     _notify();
@@ -583,6 +603,7 @@ class VpnEngine extends ChangeNotifier {
     _message = null;
     _lastPingMs = null;
     _lastPingTarget = null;
+    _lastPingConfig = null;
     _notify();
     try {
       final urls = telegramOnly || automaticSelection || batchScan
@@ -610,6 +631,7 @@ class VpnEngine extends ChangeNotifier {
           if (result >= 0) {
             _lastPingMs = result;
             _lastPingTarget = url;
+            _lastPingConfig = profile?.config;
             break;
           }
         } on Object catch (error) {
