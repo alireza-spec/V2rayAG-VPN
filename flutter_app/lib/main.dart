@@ -852,10 +852,9 @@ class _VpnShellState extends State<VpnShell> {
     ]);
     if (!mounted) return;
 
-    if (_subscriptionRestoreFailed || _profileRestoreFailed) {
-      _showMessage('Saved secure data could not be read. Existing records were not deleted; repair secure storage before connecting.');
-      return;
-    }
+    // Personal-storage recovery must not disable the independent Automatic
+    // pool route. Personal remains guarded below when no durable profile can
+    // be restored or selected.
 
     if (!_useManualProfile &&
         _cdnFrontingSettings.protocol == ConnectionProtocol.cdnFronting &&
@@ -912,7 +911,11 @@ class _VpnShellState extends State<VpnShell> {
       return;
     }
     if (_useManualProfile) {
-      _showMessage('Select a personal server or switch to automatic pool mode.');
+      _showMessage(
+        _profileRestoreFailed
+            ? 'Saved Personal profiles could not be read securely. Existing records were not changed; restore storage access before using Personal mode.'
+            : 'Select a personal server or switch to automatic pool mode.',
+      );
       return;
     }
     await _connectAutomatically();
