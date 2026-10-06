@@ -5,9 +5,12 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 import 'app_localizations.dart';
 import 'app_preferences.dart';
+import 'cdn_fronting.dart';
+import 'cdn_scanner.dart';
 import 'exclusive_pool_service.dart';
 import 'language_preferences.dart';
 import 'subscription_service.dart';
@@ -26,7 +29,7 @@ const _mint = Color(0xFF51D6AF);
 const _coral = Color(0xFFFF886E);
 const _canvas = Color(0xFFF6F7F3);
 
-enum _SubscriptionSaveChoice { saved, useOnce, cancelled }
+enum _SubscriptionSaveChoice { saved, cancelled }
 
 /// Keep the connection control available to stop an orphaned native VPN
 /// session even when secure storage could not restore its selected profile.
@@ -225,29 +228,40 @@ class _VpnShellState extends State<VpnShell> {
   final ExclusivePoolService _exclusivePool = ExclusivePoolService();
   final SubscriptionRepository _subscriptionRepository = SubscriptionRepository();
   final ProfileRepository _profileRepository = ProfileRepository();
+  final CdnFrontingPreferencesRepository _cdnPreferencesRepository =
+      CdnFrontingPreferencesRepository();
+  CdnFrontingSettings _cdnFrontingSettings = const CdnFrontingSettings();
   final Completer<void> _subscriptionsReady = Completer<void>();
   final Completer<void> _profilesReady = Completer<void>();
   final Completer<void> _routingPreferencesReady = Completer<void>();
+  final Completer<void> _connectionPreferencesReady = Completer<void>();
   Future<void> _profileWriteQueue = Future<void>.value();
   bool _profileRestoreFailed = false;
   String? _profileStorageErrorCode;
   bool _subscriptionRestoreFailed = false;
   bool _legacySecureDataUnavailable = false;
   bool _secureNamespaceRotated = false;
-  final Set<String> _sessionOnlySubscriptionIds = {};
   List<SavedSubscription> _savedSubscriptions = [];
   bool _subscriptionBusy = false;
   int? _selectedIndex;
   bool _useManualProfile = false;
   bool _connectionModeChangedByUser = false;
+  bool _connectionProtocolChangedByUser = false;
   bool _poolSearching = false;
   bool _cancelPoolSearch = false;
+  bool _personalSearching = false;
+  bool _cancelPersonalSearch = false;
+  int _personalAttemptIndex = 0;
+  int _personalAttemptCount = 0;
   bool _poolSummaryRestored = false;
   PoolConnectionSummary? _activePoolSummary;
   VpnProfile? _activePoolProfile;
   bool _activePoolPingChecked = false;
   bool? _activePoolTelegramVerified;
   String? _activePoolLeaseId;
+  String? _cdnAttemptIp;
+  int _cdnAttemptIndex = 0;
+  int _cdnAttemptCount = 0;
   static const _activePoolSummaryKey = 'active_pool_summary_v1';
   final Map<int, int> _profilePings = {};
   final Map<int, String> _profilePingFailures = {};
@@ -260,6 +274,9 @@ class _VpnShellState extends State<VpnShell> {
   final Set<String> _excludedPackages = {};
   static const MethodChannel _appPickerChannel =
       MethodChannel('v2rayag/app_picker');
+  static const MethodChannel _quickActionsChannel =
+      MethodChannel('v2rayag/quick_actions');
+  bool? _lastPublishedQuickActionState;
   static const _excludedPackagesKey = 'excluded_packages_v1';
   static const _manualProfileModeKey = 'manual_profile_mode_v1';
 
@@ -271,12 +288,52 @@ class _VpnShellState extends State<VpnShell> {
   void initState() {
     super.initState();
     _engine.addListener(_onEngineChanged);
-    _engine.initialize();
-    _restoreSubscriptions();
-    _restoreProfiles();
-    _restoreExcludedPackages();
-    _restorePoolSummary();
-    _restoreConnectionMode();
+    unawaited(_initializeAndRestore());
+  }
+
+  Future<void> _initializeAndRestore() async {
+    // Initialize the native owner first so an existing Android VPN session is
+    // known before any saved UI metadata is reconciled. Read encrypted stores
+    // sequentially: this avoids concurrent namespace migration on cold start.
+    await _engine.initialize();
+    await _restoreSubscriptions();
+    await _restoreProfiles();
+    await Future.wait([
+      _restoreExcludedPackages(),
+      _restorePoolSummary(),
+      _restoreConnectionMode(),
+    ]);
+    await _publishQuickActionState();
+    await _consumePendingQuickAction();
+  }
+
+  Future<void> _publishQuickActionState() async {
+    final connected = _engine.connected;
+    if (_lastPublishedQuickActionState == connected) return;
+    _lastPublishedQuickActionState = connected;
+    try {
+      await _quickActionsChannel.invokeMethod<void>(
+        'updateConnectionState',
+        {'connected': connected},
+      );
+    } on MissingPluginException {
+      // Non-Android/test builds have no native tile or widget.
+    } on PlatformException {
+      // Keep the VPN session independent from optional home-screen controls.
+    }
+  }
+
+  Future<void> _consumePendingQuickAction() async {
+    try {
+      final action = await _quickActionsChannel.invokeMethod<String>(
+        'consumePendingAction',
+      );
+      if (action == 'toggle' && mounted) await _toggleConnection();
+    } on MissingPluginException {
+      // Non-Android/test builds simply have no system-tile bridge.
+    } on PlatformException {
+      // A failed external launch action must not change the active VPN.
+    }
   }
 
   String _safeStorageFailure(Object error) {
@@ -410,9 +467,13 @@ class _VpnShellState extends State<VpnShell> {
         final decoded = jsonDecode(raw);
         if (decoded is Map<String, dynamic>) {
           final summary = PoolConnectionSummary.fromJson(decoded);
-          if (mounted && (!_engine.initialized || _engine.connected || _engine.connecting)) {
+          final statusName = _engine.status.connectionState.name;
+          final nativeStateMayBeRestoring = !_engine.initialized ||
+              _engine.connected || _engine.connecting || _engine.disconnecting ||
+              statusName == 'unknown';
+          if (mounted && nativeStateMayBeRestoring) {
             setState(() => _activePoolSummary = summary);
-          } else if (_engine.initialized) {
+          } else if (_engine.initialized && statusName == 'disconnected') {
             await preferences.remove(_activePoolSummaryKey);
           }
         }
@@ -448,21 +509,113 @@ class _VpnShellState extends State<VpnShell> {
     try {
       final preferences = await SharedPreferences.getInstance();
       final manual = preferences.getBool(_manualProfileModeKey) ?? false;
-      if (mounted && !_connectionModeChangedByUser) {
-        setState(() => _useManualProfile = manual);
+      final protocolSettings = await _cdnPreferencesRepository.read();
+      if (mounted) {
+        setState(() {
+          if (!_connectionProtocolChangedByUser) {
+            _cdnFrontingSettings = protocolSettings;
+          }
+          if (!_connectionModeChangedByUser) {
+            // CDN Fronting is a protocol for automatic-pool candidates only.
+            // Never restore it on top of a previously selected personal profile.
+            final activeSettings = _connectionProtocolChangedByUser
+                ? _cdnFrontingSettings
+                : protocolSettings;
+            _useManualProfile = activeSettings.protocol == ConnectionProtocol.cdnFronting
+                ? false
+                : manual;
+          }
+        });
       }
     } on Object {
       // Automatic pool mode is the safe default when preferences are unavailable.
+    } finally {
+      if (!_connectionPreferencesReady.isCompleted) {
+        _connectionPreferencesReady.complete();
+      }
+    }
+  }
+
+  Future<bool> _saveConnectionProtocol(CdnFrontingSettings next) async {
+    if (_engine.connected || _engine.connecting || _engine.disconnecting ||
+        _poolSearching || _subscriptionBusy || _engine.busy) {
+      _showMessage(_poolSearching
+          ? 'Stop the current connection attempt before changing protocol.'
+          : 'Disconnect before changing connection protocol.');
+      return false;
+    }
+    _connectionProtocolChangedByUser = true;
+    try {
+      final validated = next.validated();
+      await _cdnPreferencesRepository.save(validated);
+      if (!mounted) return false;
+      setState(() {
+        _cdnFrontingSettings = validated;
+        // Both protocol choices use the automatic pool. Selecting Personal is
+        // a separate action and resets the protocol to Auto.
+        _useManualProfile = false;
+        _tab = 0;
+      });
+      _connectionModeChangedByUser = true;
+      unawaited(_saveConnectionMode(false));
+      _showMessage('Connection protocol settings saved.');
+      // Saving a protocol is the explicit request to use it. Start only after
+      // the saved state and Connect page are active; empty CDN settings remain
+      // selected and fail closed instead of falling back to Auto.
+      await Future<void>.delayed(Duration.zero);
+      if (mounted) await _toggleConnection();
+      return true;
+    } on FormatException catch (error) {
+      if (mounted) _showMessage(error.message);
+      return false;
+    } on Object {
+      if (mounted) {
+        final persisted = await _cdnPreferencesRepository.read();
+        if (!mounted) return false;
+        setState(() => _cdnFrontingSettings = persisted);
+        _showMessage('Could not save connection protocol settings.');
+      }
+      return false;
+    }
+  }
+
+  void _deactivateCdnProtocol() {
+    if (_cdnFrontingSettings.protocol == ConnectionProtocol.auto) return;
+    final next = _cdnFrontingSettings.withProtocol(ConnectionProtocol.auto);
+    _connectionProtocolChangedByUser = true;
+    setState(() => _cdnFrontingSettings = next);
+    unawaited(_cdnPreferencesRepository.save(next).catchError((Object _) {
+      if (mounted) _showMessage('Could not save connection protocol settings.');
+    }));
+  }
+
+  Future<bool> _ensureConnectionModeSaved(bool manual) async {
+    try {
+      final preferences = await SharedPreferences.getInstance();
+      final saved = await preferences.setBool(_manualProfileModeKey, manual);
+      return saved && preferences.getBool(_manualProfileModeKey) == manual;
+    } on Object {
+      return false;
+    }
+  }
+
+  Future<bool> _ensurePersonalConnectionSettingsSaved() async {
+    if (!await _ensureConnectionModeSaved(true)) return false;
+    final personalProtocol =
+        _cdnFrontingSettings.withProtocol(ConnectionProtocol.auto);
+    try {
+      await _cdnPreferencesRepository.save(personalProtocol);
+      if (mounted && _cdnFrontingSettings.protocol != ConnectionProtocol.auto) {
+        setState(() => _cdnFrontingSettings = personalProtocol);
+      }
+      return true;
+    } on Object {
+      return false;
     }
   }
 
   Future<void> _saveConnectionMode(bool manual) async {
-    try {
-      final preferences = await SharedPreferences.getInstance();
-      await preferences.setBool(_manualProfileModeKey, manual);
-    } on Object {
-      // Keep the current session usable even if this preference cannot be saved.
-    }
+    await _ensureConnectionModeSaved(manual);
   }
 
   Future<void> _restoreExcludedPackages() async {
@@ -511,7 +664,17 @@ class _VpnShellState extends State<VpnShell> {
       final packageName = (item['packageName'] ?? '').toString().trim();
       final label = (item['label'] ?? packageName).toString().trim();
       if (packageName.isEmpty) continue;
-      apps.add(_InstalledApp(packageName, label.isEmpty ? packageName : label));
+      final rawIcon = item['iconPng'];
+      final iconBytes = rawIcon is Uint8List
+          ? rawIcon
+          : rawIcon is List<int>
+              ? Uint8List.fromList(rawIcon)
+              : null;
+      apps.add(_InstalledApp(
+        packageName,
+        label.isEmpty ? packageName : label,
+        iconBytes,
+      ));
     }
     apps.sort((a, b) => a.label.toLowerCase().compareTo(b.label.toLowerCase()));
     if (apps.isEmpty) {
@@ -545,7 +708,34 @@ class _VpnShellState extends State<VpnShell> {
                       return CheckboxListTile(
                         dense: true,
                         value: selected.contains(app.packageName),
-                        title: Text(app.label, maxLines: 1, overflow: TextOverflow.ellipsis),
+                        title: Row(
+                          children: [
+                            CircleAvatar(
+                              radius: 15,
+                              backgroundColor: Theme.of(context).colorScheme.surfaceContainerHighest,
+                              child: app.iconBytes == null
+                                  ? const Icon(Icons.android_rounded, size: 18)
+                                  : ClipOval(
+                                      child: Image.memory(
+                                        app.iconBytes!,
+                                        width: 30,
+                                        height: 30,
+                                        fit: BoxFit.cover,
+                                        errorBuilder: (context, error, stack) =>
+                                            const Icon(Icons.android_rounded, size: 18),
+                                      ),
+                                    ),
+                            ),
+                            const SizedBox(width: 10),
+                            Expanded(
+                              child: Text(
+                                app.label,
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                            ),
+                          ],
+                        ),
                         subtitle: Text(app.packageName, maxLines: 1, overflow: TextOverflow.ellipsis),
                         onChanged: (checked) => refresh(() {
                           if (checked == true) {
@@ -592,8 +782,10 @@ class _VpnShellState extends State<VpnShell> {
   }
 
   void _onEngineChanged() {
-    if (_poolSummaryRestored && _engine.initialized && !_engine.connected &&
-        !_engine.connecting && !_engine.disconnecting && !_poolSearching) {
+    unawaited(_publishQuickActionState());
+    if (_poolSummaryRestored && _engine.initialized &&
+        _engine.status.connectionState.name == 'disconnected' &&
+        !_poolSearching) {
       _activePoolSummary = null;
       _activePoolProfile = null;
       _activePoolPingChecked = false;
@@ -622,8 +814,9 @@ class _VpnShellState extends State<VpnShell> {
       return;
     }
     final isActive = _engine.connected || _engine.connecting || _engine.disconnecting;
-    if (isActive || _poolSearching) {
+    if (isActive || _poolSearching || _personalSearching) {
       _cancelPoolSearch = true;
+      _cancelPersonalSearch = true;
       // Clear the previous session presentation immediately. The engine still
       // blocks a new start until Android confirms the native tunnel is stopped.
       if (mounted) {
@@ -642,9 +835,33 @@ class _VpnShellState extends State<VpnShell> {
           return;
         }
         await _releaseActivePoolLease();
-      } else if (!_poolSearching) {
+      } else if (!_poolSearching && !_personalSearching) {
         await _releaseActivePoolLease();
       }
+      return;
+    }
+
+    // Do not start until encrypted subscription/profile data and routing
+    // preferences have been restored. This prevents a cold-start tap or system
+    // tile from racing the saved Personal selection.
+    await Future.wait([
+      _subscriptionsReady.future,
+      _profilesReady.future,
+      _routingPreferencesReady.future,
+      _connectionPreferencesReady.future,
+    ]);
+    if (!mounted) return;
+
+    // Personal-storage recovery must not disable the independent Automatic
+    // pool route. Personal remains guarded below when no durable profile can
+    // be restored or selected.
+
+    if (!_useManualProfile &&
+        _cdnFrontingSettings.protocol == ConnectionProtocol.cdnFronting &&
+        !_cdnFrontingSettings.hasOverrides) {
+      // Keep CDN selected and fail closed. An empty override is not an Auto
+      // selection, and this build has no default Meek engine to start.
+      _showMessage('CDN Fronting remains selected, but this build has no Meek engine for empty IP/SNI settings. Select Auto explicitly or configure a supported route.');
       return;
     }
 
@@ -653,31 +870,160 @@ class _VpnShellState extends State<VpnShell> {
         ? _profiles[_selectedIndex!]
         : null;
     if (profile != null) {
-      await _releaseActivePoolLease();
-      setState(() {
-        _activePoolSummary = null;
-        _activePoolProfile = null;
-        _activePoolPingChecked = false;
-        _activePoolTelegramVerified = null;
-      });
-      unawaited(_persistPoolSummary(null));
-      await _engine.connect(
-        profile,
-        blockedApps: _excludedPackages.toList(growable: false),
-      );
-      if (mounted && _engine.message != null) _showMessage(_engine.message!);
+      if (!await _ensurePersonalConnectionSettingsSaved()) {
+        _showMessage('Could not securely save the selected Personal route mode. The VPN was not started.');
+        return;
+      }
+      final selectedIndex = _selectedIndex!;
+      final sourceId = selectedIndex < _profileSources.length
+          ? _profileSources[selectedIndex]
+          : null;
+      final subscriptionIndices = sourceId == null
+          ? const <int>[]
+          : <int>[
+              selectedIndex,
+              for (var i = 0; i < _profiles.length; i++)
+                if (i != selectedIndex &&
+                    i < _profileSources.length &&
+                    _profileSources[i] == sourceId)
+                  i,
+            ];
+      if (subscriptionIndices.length > 1) {
+        await _connectPersonalSubscription(subscriptionIndices, selectedIndex);
+      } else {
+        await _releaseActivePoolLease();
+        setState(() {
+          _activePoolSummary = null;
+          _activePoolProfile = null;
+          _activePoolPingChecked = false;
+          _activePoolTelegramVerified = null;
+        });
+        unawaited(_persistPoolSummary(null));
+        // Persist the selected Personal route before starting the native
+        // service, so an Android process recreation cannot outlive its label.
+        if (!await _persistProfiles()) return;
+        await _engine.connect(
+          profile,
+          blockedApps: _excludedPackages.toList(growable: false),
+        );
+        if (mounted && _engine.message != null) _showMessage(_engine.message!);
+      }
       return;
     }
     if (_useManualProfile) {
-      _showMessage('Select a personal server or switch to automatic pool mode.');
+      _showMessage(
+        _profileRestoreFailed
+            ? 'Saved Personal profiles could not be read securely. Existing records were not changed; restore storage access before using Personal mode.'
+            : 'Select a personal server or switch to automatic pool mode.',
+      );
       return;
     }
     await _connectAutomatically();
   }
 
+  Future<void> _connectPersonalSubscription(
+    List<int> candidateIndices,
+    int originalIndex,
+  ) async {
+    if (!_engine.canStart) {
+      _showMessage('The VPN engine is not ready yet. Try again in a moment.');
+      return;
+    }
+    await _releaseActivePoolLease();
+    // Reuse successful measured delays for the same loaded subscription, but
+    // always keep inconclusive profiles in the retry set. A failed ping is not
+    // proof that a profile is unusable.
+    final orderedCandidateIndices = [...candidateIndices]..sort((left, right) {
+      final latencyOrder = compareMeasuredLatency(
+        _profilePings[left],
+        _profilePings[right],
+      );
+      if (latencyOrder != 0) return latencyOrder;
+      if (left == originalIndex) return -1;
+      if (right == originalIndex) return 1;
+      return left.compareTo(right);
+    });
+    setState(() {
+      _personalSearching = true;
+      _cancelPersonalSearch = false;
+      _personalAttemptCount = orderedCandidateIndices.length;
+      _personalAttemptIndex = 0;
+      _activePoolSummary = null;
+      _activePoolProfile = null;
+      _activePoolPingChecked = false;
+      _activePoolTelegramVerified = null;
+    });
+    unawaited(_persistPoolSummary(null));
+    var connected = false;
+    try {
+      for (var attempt = 0; attempt < orderedCandidateIndices.length; attempt++) {
+        if (_cancelPersonalSearch || !mounted) break;
+        final index = orderedCandidateIndices[attempt];
+        if (index < 0 || index >= _profiles.length) continue;
+        setState(() {
+          _selectedIndex = index;
+          _personalAttemptIndex = attempt + 1;
+        });
+        // Save the exact candidate before native Android can keep the VPN
+        // alive beyond this Dart process. On restart the route label and its
+        // subscription source then match the active native session.
+        if (!await _persistProfiles()) break;
+        connected = await _engine.connect(
+          _profiles[index],
+          blockedApps: _excludedPackages.toList(growable: false),
+        );
+        // If the user cancels while Android's permission sheet or native start
+        // is in flight, reconcile any late successful start before returning.
+        if (_cancelPersonalSearch) {
+          if (_engine.connected || _engine.connecting) {
+            await _engine.disconnect();
+          }
+          connected = _engine.connected;
+          break;
+        }
+        if (connected || _engine.connected) {
+          connected = true;
+          await _persistProfiles();
+          break;
+        }
+        // Never start another candidate while Android's tunnel state is
+        // uncertain or cleanup has not completed.
+        if (_cancelPersonalSearch || _engine.connected || _engine.connecting ||
+            _engine.disconnecting || _engine.busy || !_engine.canStart ||
+            !shouldRetrySubscriptionProfile(_engine.failureCategory)) {
+          break;
+        }
+      }
+      if (!connected && !_cancelPersonalSearch && mounted) {
+        setState(() => _selectedIndex = originalIndex);
+        final saved = await _persistProfiles();
+        if (saved && _engine.message != null) _showMessage(_engine.message!);
+      }
+    } finally {
+      if (mounted) {
+        setState(() {
+          _personalSearching = false;
+          _personalAttemptIndex = 0;
+          _personalAttemptCount = 0;
+          _cancelPersonalSearch = false;
+        });
+      }
+    }
+  }
+
   Future<void> _connectAutomatically() async {
     if (!_engine.canStart) {
       _showMessage('The VPN engine is not ready yet. Try again in a moment.');
+      return;
+    }
+    if (!await _ensureConnectionModeSaved(false)) {
+      _showMessage('Could not save the Automatic connection mode. The VPN was not started.');
+      return;
+    }
+    try {
+      await _cdnPreferencesRepository.save(_cdnFrontingSettings);
+    } on Object {
+      _showMessage('Could not save connection protocol settings. The VPN was not started.');
       return;
     }
 
@@ -688,6 +1034,12 @@ class _VpnShellState extends State<VpnShell> {
     final triedIds = <String>{};
     String? currentLeaseId;
     String? retainedLeaseId;
+    var sawCdnCompatibleCandidate = false;
+    var sawCdnIncompatibleCandidate = false;
+    final cdnSettingsForAttempt = _cdnFrontingSettings;
+    final cdnOverridesActive =
+        cdnSettingsForAttempt.protocol == ConnectionProtocol.cdnFronting &&
+            cdnSettingsForAttempt.hasOverrides;
     _activePoolLeaseId = null;
     setState(() {
       _poolSearching = true;
@@ -696,6 +1048,9 @@ class _VpnShellState extends State<VpnShell> {
       _activePoolProfile = null;
       _activePoolPingChecked = false;
       _activePoolTelegramVerified = null;
+      _cdnAttemptIp = null;
+      _cdnAttemptIndex = 0;
+      _cdnAttemptCount = 0;
     });
     unawaited(_persistPoolSummary(null));
 
@@ -720,10 +1075,53 @@ class _VpnShellState extends State<VpnShell> {
         }
 
         final candidate = lease.candidate;
-        final connected = await _engine.connect(
-          candidate.profile,
-          blockedApps: _excludedPackages.toList(growable: false),
-        );
+        late final List<VpnProfile> profileAttempts;
+        try {
+          profileAttempts = buildCdnProfileAttempts(candidate.profile, cdnSettingsForAttempt);
+          sawCdnCompatibleCandidate = true;
+        } on CdnMeekEngineUnavailableException {
+          await _exclusivePool.releaseLease(lease.leaseId);
+          currentLeaseId = null;
+          if (!_cancelPoolSearch && mounted) {
+            _showMessage('Empty CDN fields keep CDN selected, but this build has no independent Meek engine.');
+          }
+          break;
+        } on CdnProfileNotSupportedException {
+          sawCdnIncompatibleCandidate = true;
+          await _exclusivePool.releaseLease(lease.leaseId);
+          currentLeaseId = null;
+          continue;
+        } on FormatException {
+          // A malformed candidate must not strand its lease or prevent the
+          // next automatic server from being tried.
+          sawCdnIncompatibleCandidate = true;
+          await _exclusivePool.releaseLease(lease.leaseId);
+          currentLeaseId = null;
+          continue;
+        }
+        VpnProfile? attemptedProfile;
+        var connected = false;
+        for (var attemptIndex = 0; attemptIndex < profileAttempts.length; attemptIndex++) {
+          if (_cancelPoolSearch) break;
+          final profileAttempt = profileAttempts[attemptIndex];
+          attemptedProfile = profileAttempt;
+          if (mounted && cdnSettingsForAttempt.protocol == ConnectionProtocol.cdnFronting) {
+            final ips = cdnSettingsForAttempt.parsedIps;
+            setState(() {
+              _cdnAttemptIp = ips.isEmpty ? null : ips[attemptIndex];
+              _cdnAttemptIndex = attemptIndex + 1;
+              _cdnAttemptCount = profileAttempts.length;
+            });
+          }
+          connected = await _engine.connect(
+            profileAttempt,
+            blockedApps: _excludedPackages.toList(growable: false),
+          );
+          if (connected || _cancelPoolSearch || _engine.connected ||
+              _engine.connecting || _engine.disconnecting || !_engine.canStart) {
+            break;
+          }
+        }
 
         if (_cancelPoolSearch) {
           // A cancel can arrive while Android's permission sheet or start
@@ -760,7 +1158,7 @@ class _VpnShellState extends State<VpnShell> {
           retainedLeaseId = lease.leaseId;
           currentLeaseId = null;
           _activePoolLeaseId = lease.leaseId;
-          _activePoolProfile = candidate.profile;
+          _activePoolProfile = attemptedProfile ?? candidate.profile;
           if (mounted) {
             setState(() {
               _activePoolSummary = candidate.summary;
@@ -770,7 +1168,7 @@ class _VpnShellState extends State<VpnShell> {
             unawaited(_persistPoolSummary(candidate.summary));
           }
           final latency = await _engine.measurePing(
-            candidate.profile,
+            attemptedProfile ?? candidate.profile,
             telegramOnly: true,
           );
           if (mounted) {
@@ -789,7 +1187,7 @@ class _VpnShellState extends State<VpnShell> {
           retainedLeaseId = lease.leaseId;
           currentLeaseId = null;
           _activePoolLeaseId = lease.leaseId;
-          _activePoolProfile = candidate.profile;
+          _activePoolProfile = attemptedProfile ?? candidate.profile;
           if (mounted) {
             setState(() {
               _activePoolSummary = candidate.summary;
@@ -816,9 +1214,13 @@ class _VpnShellState extends State<VpnShell> {
         }
       }
 
-      if (retainedLeaseId == null && !_cancelPoolSearch && mounted &&
-          _engine.message == null) {
-        _showMessage('Could not connect to an available server. Please try again later.');
+      if (retainedLeaseId == null && !_cancelPoolSearch && mounted) {
+        if (cdnOverridesActive && sawCdnIncompatibleCandidate &&
+            !sawCdnCompatibleCandidate) {
+          _showMessage('CDN Fronting needs an automatic server using TLS WebSocket.');
+        } else if (_engine.message == null) {
+          _showMessage('Could not connect to an available server. Please try again later.');
+        }
       }
     } on FormatException catch (error) {
       if (!_cancelPoolSearch && mounted) _showMessage(error.message);
@@ -838,6 +1240,7 @@ class _VpnShellState extends State<VpnShell> {
     if (_engine.connected || _engine.connecting || _engine.disconnecting || _poolSearching) return;
     _connectionModeChangedByUser = true;
     setState(() => _useManualProfile = false);
+    _deactivateCdnProtocol();
     unawaited(_saveConnectionMode(false));
   }
 
@@ -851,6 +1254,7 @@ class _VpnShellState extends State<VpnShell> {
       _useManualProfile = true;
       if (openServers) _tab = 1;
     });
+    _deactivateCdnProtocol();
     unawaited(_saveConnectionMode(true));
     if (_profiles.isEmpty) {
       _showMessage('Import a personal server profile to use this mode.');
@@ -952,6 +1356,21 @@ class _VpnShellState extends State<VpnShell> {
     );
   }
 
+  Future<void> _openTelegramChannel() async {
+    final uri = Uri.parse('https://t.me/V2rayAG');
+    try {
+      final opened = await launchUrl(
+        uri,
+        mode: LaunchMode.externalApplication,
+      );
+      if (!opened && mounted) {
+        _showMessage('Could not open the Telegram channel link.');
+      }
+    } on Object {
+      if (mounted) _showMessage('Could not open the Telegram channel link.');
+    }
+  }
+
   Future<int?> _probeProfile(int index, {bool batchScan = false}) async {
     if (index < 0 || index >= _profiles.length || _probingProfiles.contains(index)) {
       return null;
@@ -1014,6 +1433,7 @@ class _VpnShellState extends State<VpnShell> {
       _batchPingCompleted = 0;
       _batchPingTotal = indices.length;
       _cancelBatchPing = false;
+      _probingProfiles.addAll(indices);
       _profilePings.removeWhere((index, _) => indices.contains(index));
       _profilePingFailures.removeWhere((index, _) => indices.contains(index));
       _failedPings.removeAll(indices);
@@ -1021,17 +1441,35 @@ class _VpnShellState extends State<VpnShell> {
     var responded = 0;
     var attempted = 0;
     try {
-      for (final index in indices) {
-        if (_cancelBatchPing || !mounted) break;
-        final result = await _probeProfile(index, batchScan: true);
-        attempted++;
-        if (result != null) responded++;
-        if (mounted) setState(() => _batchPingCompleted = attempted);
-      }
+      final profiles = indices.map((index) => _profiles[index]).toList(growable: false);
+      await _engine.measureBatchPings(
+        profiles,
+        concurrency: 4,
+        shouldCancel: () => _cancelBatchPing || !mounted,
+        onResult: (profileOffset, result) {
+          if (!mounted || profileOffset < 0 || profileOffset >= indices.length) return;
+          final index = indices[profileOffset];
+          attempted++;
+          if (result != null) {
+            responded++;
+            _profilePings[index] = result;
+            _profilePingFailures.remove(index);
+            _failedPings.remove(index);
+          } else {
+            _profilePingFailures[index] = 'NoDelayResult';
+            _failedPings.add(index);
+          }
+          setState(() {
+            _probingProfiles.remove(index);
+            _batchPingCompleted = attempted;
+          });
+        },
+      );
     } finally {
       final cancelled = _cancelBatchPing;
       if (mounted) {
         setState(() {
+          _probingProfiles.removeAll(indices);
           _subscriptionBusy = false;
           _batchPingSubscriptionId = null;
           _batchPingCompleted = 0;
@@ -1050,6 +1488,72 @@ class _VpnShellState extends State<VpnShell> {
     setState(() => _cancelBatchPing = true);
   }
 
+  Future<void> _removeNoPingProfiles(SavedSubscription subscription) async {
+    if (_subscriptionBusy || _batchPingSubscriptionId != null ||
+        _engine.connected || _engine.connecting || _engine.disconnecting) {
+      return;
+    }
+    final indices = <int>[
+      for (var i = 0; i < _profiles.length; i++)
+        if (i < _profileSources.length &&
+            _profileSources[i] == subscription.id &&
+            _failedPings.contains(i))
+          i,
+    ];
+    if (indices.isEmpty) {
+      _showMessage('No profiles with an inconclusive latency result were found.');
+      return;
+    }
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const LocalizedText('Remove profiles without a ping result?'),
+        content: LocalizedText(
+          'This will remove ${indices.length} profiles from this device. A missing ping result does not prove that a server is offline or cannot connect.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(false),
+            child: const LocalizedText('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(dialogContext).pop(true),
+            child: const LocalizedText('Remove profiles'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+    final removed = indices.toSet();
+    final oldSelected = _selectedIndex;
+    final selectedRemoved = oldSelected != null && removed.contains(oldSelected);
+    setState(() {
+      for (final index in indices.reversed) {
+        _profiles.removeAt(index);
+        _profileSources.removeAt(index);
+      }
+      _profilePings.clear();
+      _profilePingFailures.clear();
+      _failedPings.clear();
+      _probingProfiles.clear();
+      if (selectedRemoved || _profiles.isEmpty) {
+        _selectedIndex = _profiles.isEmpty ? null : 0;
+        if (selectedRemoved) _useManualProfile = false;
+      } else if (oldSelected != null) {
+        _selectedIndex = oldSelected - indices.where((index) => index < oldSelected).length;
+      }
+    });
+    if (selectedRemoved) {
+      _connectionModeChangedByUser = true;
+      _deactivateCdnProtocol();
+      unawaited(_saveConnectionMode(false));
+    }
+    final saved = await _persistProfiles();
+    if (saved && mounted) {
+      _showMessage('Removed ${indices.length} profiles with no latency result.');
+    }
+  }
+
   void _selectProfile(int index) {
     if (_subscriptionBusy || _poolSearching || !_profilesReady.isCompleted) return;
     if (_engine.connected || _engine.connecting || _engine.disconnecting) {
@@ -1061,6 +1565,7 @@ class _VpnShellState extends State<VpnShell> {
       _selectedIndex = index;
       _useManualProfile = true;
     });
+    _deactivateCdnProtocol();
     unawaited(_saveConnectionMode(true));
     unawaited(_persistProfiles().then<void>((_) {}));
   }
@@ -1124,45 +1629,17 @@ class _VpnShellState extends State<VpnShell> {
     );
   }
 
-  void _rememberSessionOnlySubscription(SavedSubscription subscription) {
-    setState(() {
-      final index = _savedSubscriptions.indexWhere((item) => item.id == subscription.id);
-      if (index < 0) {
-        _savedSubscriptions.add(subscription);
-      } else {
-        _savedSubscriptions[index] = subscription;
-      }
-      _sessionOnlySubscriptionIds.add(subscription.id);
-    });
-  }
-
   Future<_SubscriptionSaveChoice> _saveSubscription(
     SavedSubscription subscription,
   ) async {
+    await _subscriptionsReady.future;
     if (_subscriptionRestoreFailed) {
-      if (!mounted) return _SubscriptionSaveChoice.cancelled;
-      final useOnce = await showDialog<bool>(
-        context: context,
-        builder: (dialogContext) => AlertDialog(
-          title: const LocalizedText('Secure storage is unreadable'),
-          content: const LocalizedText(
-            'The app will not replace data it cannot read. You can cancel, or use this subscription for this session only; it will not be saved and will disappear when the app closes.',
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.of(dialogContext).pop(false),
-              child: const LocalizedText('Cancel'),
-            ),
-            FilledButton(
-              onPressed: () => Navigator.of(dialogContext).pop(true),
-              child: const LocalizedText('Use once'),
-            ),
-          ],
-        ),
-      );
-      if (useOnce != true || !mounted) return _SubscriptionSaveChoice.cancelled;
-      _rememberSessionOnlySubscription(subscription);
-      return _SubscriptionSaveChoice.useOnce;
+      if (mounted) {
+        _showMessage(
+          'Saved subscription data could not be read securely. Nothing was replaced; repair secure storage before adding or editing subscriptions.',
+        );
+      }
+      return _SubscriptionSaveChoice.cancelled;
     }
     final next = [..._savedSubscriptions];
     final index = next.indexWhere((item) => item.id == subscription.id);
@@ -1175,32 +1652,13 @@ class _VpnShellState extends State<VpnShell> {
       await _subscriptionRepository.saveAll(next);
       if (mounted) setState(() => _savedSubscriptions = next);
       return _SubscriptionSaveChoice.saved;
-    } on Object {
-      if (!mounted) return _SubscriptionSaveChoice.cancelled;
-      final useOnce = await showDialog<bool>(
-        context: context,
-        builder: (dialogContext) => AlertDialog(
-          title: const LocalizedText('Secure save is unavailable'),
-          content: const LocalizedText(
-            'Android could not save this URL in secure storage. You can use it once in this session without saving it. It will be discarded when the app closes and will not be stored as plain text.',
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.of(dialogContext).pop(false),
-              child: const LocalizedText('Cancel'),
-            ),
-            FilledButton(
-              onPressed: () => Navigator.of(dialogContext).pop(true),
-              child: const LocalizedText('Use once'),
-            ),
-          ],
-        ),
-      );
-      if (useOnce != true || !mounted) {
-        return _SubscriptionSaveChoice.cancelled;
+    } on Object catch (error) {
+      if (mounted) {
+        _showMessage(
+          'Subscription was not added because secure storage could not verify the save (${_safeStorageFailure(error)}). Try again after fixing device storage.',
+        );
       }
-      _rememberSessionOnlySubscription(subscription);
-      return _SubscriptionSaveChoice.useOnce;
+      return _SubscriptionSaveChoice.cancelled;
     }
   }
 
@@ -1239,8 +1697,7 @@ class _VpnShellState extends State<VpnShell> {
     await _subscriptionsReady.future;
     await _profilesReady.future;
     if (!mounted) return;
-    final sessionOnly = _sessionOnlySubscriptionIds.contains(subscription.id);
-    if (_subscriptionRestoreFailed && !sessionOnly) {
+    if (_subscriptionRestoreFailed) {
       _showMessage('Subscription storage could not be read; repair it before changing saved subscriptions.');
       return;
     }
@@ -1249,13 +1706,10 @@ class _VpnShellState extends State<VpnShell> {
         ? _profiles[_selectedIndex!].config
         : null;
     try {
-      if (!_subscriptionRestoreFailed) {
-        await _subscriptionRepository.saveAll(next);
-      }
+      await _subscriptionRepository.saveAll(next);
       if (!mounted) return;
       setState(() {
         _savedSubscriptions = next;
-        _sessionOnlySubscriptionIds.remove(subscription.id);
         final retained = <VpnProfile>[];
         final retainedSources = <String?>[];
         for (var i = 0; i < _profiles.length; i++) {
@@ -1400,26 +1854,37 @@ class _VpnShellState extends State<VpnShell> {
         poolPingChecked: _activePoolPingChecked,
         poolTelegramVerified: _activePoolTelegramVerified,
         poolSearching: _poolSearching,
+        personalSearching: _personalSearching,
+        personalAttemptIndex: _personalAttemptIndex,
+        personalAttemptCount: _personalAttemptCount,
+        cdnProtocolSelected: _cdnFrontingSettings.protocol == ConnectionProtocol.cdnFronting && !_useManualProfile,
+        cdnIps: _cdnFrontingSettings.cdnIps,
+        cdnSniHostname: _cdnFrontingSettings.sniHostname,
+        cdnAttemptIp: _cdnAttemptIp,
+        cdnAttemptIndex: _cdnAttemptIndex,
+        cdnAttemptCount: _cdnAttemptCount,
         onUseAutomaticPool: _useAutomaticPool,
         onUsePersonalProfile: () => _usePersonalProfile(openServers: false),
         onOpenServers: () => setState(() => _tab = 1),
+        onOpenConnectionProtocol: () => setState(() => _tab = 3),
         personalMode: _useManualProfile,
         modeSelectionEnabled: !_engine.connected && !_engine.connecting &&
-            !_engine.disconnecting && !_poolSearching && !_subscriptionBusy && !_engine.busy,
+            !_engine.disconnecting && !_poolSearching && !_personalSearching &&
+            !_subscriptionBusy && !_engine.busy,
         engine: _engine,
         showDestination: widget.showDestination,
         reducedMotion: widget.reducedMotion,
         onToggleConnection: _toggleConnection,
         onMeasurePing: _measurePing,
         onShowDiagnostics: _showConnectionDiagnostics,
-        subscriptionBusy: _subscriptionBusy || _batchPingSubscriptionId != null,
+        subscriptionBusy: _subscriptionBusy || _batchPingSubscriptionId != null || _personalSearching,
       ),
       _ProfilesPage(
         profiles: _profiles,
         profileSources: _profileSources,
         selectedIndex: _selectedIndex,
         showDestination: widget.showDestination,
-        connected: _engine.connected || _engine.connecting || _engine.disconnecting || _poolSearching,
+        connected: _engine.connected || _engine.connecting || _engine.disconnecting || _poolSearching || _personalSearching,
         onImport: _importProfile,
         onSelect: _selectProfile,
         onRemove: _removeProfile,
@@ -1435,6 +1900,7 @@ class _VpnShellState extends State<VpnShell> {
         onRefreshSubscription: _refreshSubscription,
         onTestSubscriptionPings: _testSubscriptionPings,
         onCancelSubscriptionPings: _cancelSubscriptionPings,
+        onRemoveNoPingProfiles: _removeNoPingProfiles,
         pingingSubscriptionId: _batchPingSubscriptionId,
         pingBatchCompleted: _batchPingCompleted,
         pingBatchTotal: _batchPingTotal,
@@ -1462,7 +1928,17 @@ class _VpnShellState extends State<VpnShell> {
         onThemeChanged: widget.onThemeChanged,
         onEditAppRouting: _editExcludedApps,
         excludedAppsCount: _excludedPackages.length,
+        onOpenConnectionProtocol: () => setState(() => _tab = 3),
       ),
+      _ConnectionProtocolPage(
+        key: const ValueKey('connection-protocol-page'),
+        settings: _cdnFrontingSettings,
+        locked: _engine.connected || _engine.connecting || _engine.disconnecting ||
+            _poolSearching || _subscriptionBusy || _engine.busy,
+        onSave: _saveConnectionProtocol,
+        onBack: () => setState(() => _tab = 2),
+      ),
+      _TermsSecurityPage(onOpenTelegramChannel: _openTelegramChannel),
     ];
 
     return Scaffold(
@@ -1524,6 +2000,37 @@ class _VpnShellState extends State<VpnShell> {
                 onTap: () {
                   Navigator.of(context).pop();
                   setState(() => _tab = 2);
+                },
+              ),
+              ListTile(
+                leading: const Icon(Icons.hub_rounded),
+                title: const LocalizedText('Connection protocol'),
+                subtitle: LocalizedText(_cdnFrontingSettings.protocol == ConnectionProtocol.auto
+                    ? 'Auto'
+                    : 'CDN Fronting'),
+                selected: _tab == 3,
+                onTap: () {
+                  Navigator.of(context).pop();
+                  setState(() => _tab = 3);
+                },
+              ),
+              ListTile(
+                leading: const Icon(Icons.policy_outlined),
+                title: const LocalizedText('Terms & security'),
+                subtitle: const LocalizedText('How connection and data handling work'),
+                selected: _tab == 4,
+                onTap: () {
+                  Navigator.of(context).pop();
+                  setState(() => _tab = 4);
+                },
+              ),
+              ListTile(
+                leading: const Icon(Icons.send_outlined),
+                title: const LocalizedText('Join Telegram channel'),
+                subtitle: const LocalizedText('@V2rayAG'),
+                onTap: () {
+                  Navigator.of(context).pop();
+                  unawaited(_openTelegramChannel());
                 },
               ),
               const Divider(indent: 16, endIndent: 16),
@@ -1595,7 +2102,7 @@ class _VpnShellState extends State<VpnShell> {
         child: IndexedStack(index: _tab, children: pages),
       ),
       bottomNavigationBar: NavigationBar(
-        selectedIndex: _tab,
+        selectedIndex: _tab > 2 ? 2 : _tab,
         onDestinationSelected: (index) => setState(() => _tab = index),
         destinations: [
           NavigationDestination(icon: const Icon(Icons.radio_button_checked_rounded), label: context.tr('Connect')),
@@ -1607,6 +2114,28 @@ class _VpnShellState extends State<VpnShell> {
   }
 }
 
+class _CdnValueRow extends StatelessWidget {
+  const _CdnValueRow({required this.label, required this.value});
+
+  final String label;
+  final String value;
+
+  @override
+  Widget build(BuildContext context) => Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          SizedBox(width: 116, child: LocalizedText(label, style: const TextStyle(fontSize: 12, color: _muted))),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Directionality(
+              textDirection: TextDirection.ltr,
+              child: SelectableText(value, style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600)),
+            ),
+          ),
+        ],
+      );
+}
+
 class _HomePage extends StatelessWidget {
   const _HomePage({
     required this.profile,
@@ -1614,9 +2143,19 @@ class _HomePage extends StatelessWidget {
     required this.poolPingChecked,
     required this.poolTelegramVerified,
     required this.poolSearching,
+    required this.personalSearching,
+    required this.personalAttemptIndex,
+    required this.personalAttemptCount,
+    required this.cdnProtocolSelected,
+    required this.cdnIps,
+    required this.cdnSniHostname,
+    required this.cdnAttemptIp,
+    required this.cdnAttemptIndex,
+    required this.cdnAttemptCount,
     required this.onUseAutomaticPool,
     required this.onUsePersonalProfile,
     required this.onOpenServers,
+    required this.onOpenConnectionProtocol,
     required this.personalMode,
     required this.modeSelectionEnabled,
     required this.engine,
@@ -1633,9 +2172,19 @@ class _HomePage extends StatelessWidget {
   final bool poolPingChecked;
   final bool? poolTelegramVerified;
   final bool poolSearching;
+  final bool personalSearching;
+  final int personalAttemptIndex;
+  final int personalAttemptCount;
+  final bool cdnProtocolSelected;
+  final String cdnIps;
+  final String cdnSniHostname;
+  final String? cdnAttemptIp;
+  final int cdnAttemptIndex;
+  final int cdnAttemptCount;
   final VoidCallback onUseAutomaticPool;
   final VoidCallback onUsePersonalProfile;
   final VoidCallback onOpenServers;
+  final VoidCallback onOpenConnectionProtocol;
   final bool personalMode;
   final bool modeSelectionEnabled;
   final VpnEngine engine;
@@ -1650,7 +2199,41 @@ class _HomePage extends StatelessWidget {
   Widget build(BuildContext context) {
     final dark = Theme.of(context).brightness == Brightness.dark;
     final card = dark ? const Color(0xFF192321) : Colors.white;
-    final activeOrPending = engine.connected || engine.connecting || engine.disconnecting || poolSearching;
+    final activeOrPending = engine.connected || engine.connecting || engine.disconnecting || poolSearching || personalSearching;
+    final cdnFrontingSelected = cdnProtocolSelected && !personalMode;
+    final savedCdnIps = cdnIps.trim();
+    final savedCdnSni = cdnSniHostname.trim();
+    final connectionModeLabel = cdnFrontingSelected
+        ? 'CDN FRONTING'
+        : personalMode
+            ? 'PERSONAL'
+            : 'AUTOMATIC';
+    final cdnAttemptTarget = cdnAttemptIp ??
+        (savedCdnSni.isNotEmpty ? savedCdnSni : context.tr('No CDN override configured'));
+    final connectionMessage = personalSearching
+        ? '${context.tr('Trying subscription profile…')} $personalAttemptIndex/$personalAttemptCount'
+        : poolSearching && cdnFrontingSelected
+            ? '${context.tr('Connecting with CDN Fronting')}\n${context.tr('CDN IPs')}: ${savedCdnIps.isEmpty ? context.tr('No CDN override configured') : savedCdnIps}\n${context.tr('CDN SNI hostname')}: ${savedCdnSni.isEmpty ? context.tr('No CDN override configured') : savedCdnSni}\n${context.tr('Attempt')} $cdnAttemptIndex/$cdnAttemptCount · $cdnAttemptTarget'
+            : poolSearching
+                ? context.tr('Connecting to a suitable server…')
+                : profile == null
+                    ? poolSummary != null && engine.connected
+                        ? poolTelegramVerified == false
+                            ? context.tr('Telegram could not be verified; connected using the best available route.')
+                            : context.tr('VPN service is connected through the automatic pool.')
+                        : activeOrPending
+                            ? context.tr('VPN service is active. Tap the shield to disconnect.')
+                            : context.tr(engine.message ?? 'Tap to connect automatically')
+                    : engine.connected
+                        ? context.tr('VPN service is connected. Test latency to verify network access.')
+                        : context.tr(engine.message ??
+                            (engine.connecting
+                                ? 'Waiting for the Android tunnel status…'
+                                : engine.disconnecting
+                                    ? 'Waiting for Android to confirm disconnect…'
+                                    : engine.initialized
+                                        ? 'Tap to request Android VPN permission'
+                                        : 'Preparing Android VPN engine…'));
     final candidate = poolSummary;
     final visibleLatencyMs = engine.latencyForProfile(profile);
     final poolConnected = candidate != null && engine.connected;
@@ -1687,10 +2270,12 @@ class _HomePage extends StatelessWidget {
         const SizedBox(height: 18),
         _ConnectionModeSelector(
           personalMode: personalMode,
+          cdnProtocolSelected: cdnFrontingSelected,
           enabled: modeSelectionEnabled,
           onUseAutomaticPool: onUseAutomaticPool,
           onUsePersonalProfile: onUsePersonalProfile,
           onOpenServers: onOpenServers,
+          onOpenConnectionProtocol: onOpenConnectionProtocol,
           hasPersonalProfile: profile != null,
         ),
         const SizedBox(height: 20),
@@ -1699,9 +2284,9 @@ class _HomePage extends StatelessWidget {
             reducedMotion: reducedMotion,
             dark: dark,
             connected: engine.connected,
-            connecting: engine.connecting || poolSearching,
+            connecting: engine.connecting || poolSearching || personalSearching,
             disconnecting: engine.disconnecting,
-            failed: engine.message != null && !engine.connected && !engine.connecting && !poolSearching,
+            failed: engine.message != null && !engine.connected && !engine.connecting && !poolSearching && !personalSearching,
             enabled: canToggleVpnAction(
               hasProfile: true,
               activeOrPending: activeOrPending,
@@ -1716,29 +2301,10 @@ class _HomePage extends StatelessWidget {
         Center(
           child: Column(
             children: [
-              LocalizedText(poolSearching ? 'CONNECTING' : engine.stateLabel, style: TextStyle(fontSize: 12, letterSpacing: 2.1, fontWeight: FontWeight.w800, color: engine.connected ? const Color(0xFF67DDB7) : (dark ? const Color(0xFFE0EAE6) : _ink))),
+              LocalizedText(poolSearching || personalSearching ? 'CONNECTING' : engine.stateLabel, style: TextStyle(fontSize: 12, letterSpacing: 2.1, fontWeight: FontWeight.w800, color: engine.connected ? const Color(0xFF67DDB7) : (dark ? const Color(0xFFE0EAE6) : _ink))),
               const SizedBox(height: 5),
-              LocalizedText(
-                poolSearching
-                    ? 'Connecting to a suitable server…'
-                    : profile == null
-                        ? poolSummary != null && engine.connected
-                            ? poolTelegramVerified == false
-                                ? 'Telegram could not be verified; connected using the best available route.'
-                                : 'VPN service is connected through the automatic pool.'
-                            : activeOrPending
-                                ? 'VPN service is active. Tap the shield to disconnect.'
-                                : engine.message ?? 'Tap to connect automatically'
-                        : engine.connected
-                            ? 'VPN service is connected. Test latency to verify network access.'
-                            : engine.message ??
-                                (engine.connecting
-                                    ? 'Waiting for the Android tunnel status…'
-                                    : engine.disconnecting
-                                        ? 'Waiting for Android to confirm disconnect…'
-                                        : engine.initialized
-                                            ? 'Tap to request Android VPN permission'
-                                            : 'Preparing Android VPN engine…'),
+              Text(
+                connectionMessage,
                 textAlign: TextAlign.center,
                 style: const TextStyle(fontSize: 12, color: _muted),
               ),
@@ -1773,9 +2339,7 @@ class _HomePage extends StatelessWidget {
                 const SizedBox(width: 8),
                 Expanded(child: LocalizedText(poolConnected ? 'SECURE ROUTE' : 'DESTINATION', style: const TextStyle(fontSize: 10, letterSpacing: 1.4, fontWeight: FontWeight.w800, color: _muted))),
                 Text(
-                  poolConnected || poolSearching
-                      ? context.tr('AUTOMATIC')
-                      : (profile?.protocol ?? context.tr(engine.connected ? 'ACTIVE SESSION' : 'NO SERVER')),
+                  context.tr(connectionModeLabel),
                   textDirection: TextDirection.ltr,
                   style: const TextStyle(fontSize: 10, fontWeight: FontWeight.w800, color: _muted),
                 ),
@@ -1801,14 +2365,45 @@ class _HomePage extends StatelessWidget {
               const SizedBox(height: 5),
               LocalizedText(poolConnected
                       ? 'Subscription route. No device IP is displayed.'
-                      : poolSearching
-                          ? 'Testing candidate servers on this network.'
-                          : profile == null
-                              ? engine.connected
-                                  ? 'Route details are not available for this active session.'
-                                  : 'No client address is read or displayed.'
-                              : 'Country: not looked up',
+                      : poolSearching && cdnFrontingSelected
+                          ? 'CDN Fronting connection attempt is in progress.'
+                          : poolSearching
+                              ? 'Testing candidate servers on this network.'
+                              : profile == null
+                                  ? engine.connected
+                                      ? 'Route details are not available for this active session.'
+                                      : cdnFrontingSelected
+                                          ? 'CDN Fronting is selected. Empty fields do not switch to Auto; a compatible Meek engine is not available in this build.'
+                                          : 'No client address is read or displayed.'
+                                  : 'Country: not looked up',
                   style: const TextStyle(fontSize: 12, color: _muted)),
+              if (personalMode && profile != null) ...[
+                const SizedBox(height: 8),
+                _MetricRow(label: 'SERVER PROFILE', value: profile?.name ?? context.tr('Unknown')),
+              ],
+              if (cdnFrontingSelected) ...[
+                const SizedBox(height: 8),
+                _CdnValueRow(
+                  label: 'CDN IPs',
+                  value: savedCdnIps.isEmpty
+                      ? context.tr('No CDN override configured')
+                      : savedCdnIps,
+                ),
+                const SizedBox(height: 6),
+                _CdnValueRow(
+                  label: 'CDN SNI hostname',
+                  value: savedCdnSni.isEmpty
+                      ? context.tr('No CDN override configured')
+                      : savedCdnSni,
+                ),
+                if (poolSearching) ...[
+                  const SizedBox(height: 4),
+                  _MetricRow(
+                    label: 'CONNECTION ATTEMPT',
+                    value: '$cdnAttemptIndex/$cdnAttemptCount · $cdnAttemptTarget',
+                  ),
+                ],
+              ],
               if (poolConnected) ...[
                 const SizedBox(height: 8),
                 _MetricRow(
@@ -1878,32 +2473,26 @@ class _HomePage extends StatelessWidget {
 class _ConnectionModeSelector extends StatelessWidget {
   const _ConnectionModeSelector({
     required this.personalMode,
+    required this.cdnProtocolSelected,
     required this.enabled,
     required this.onUseAutomaticPool,
     required this.onUsePersonalProfile,
     required this.onOpenServers,
+    required this.onOpenConnectionProtocol,
     required this.hasPersonalProfile,
   });
 
   final bool personalMode;
+  final bool cdnProtocolSelected;
   final bool enabled;
   final VoidCallback onUseAutomaticPool;
   final VoidCallback onUsePersonalProfile;
   final VoidCallback onOpenServers;
+  final VoidCallback onOpenConnectionProtocol;
   final bool hasPersonalProfile;
 
   @override
-  Widget build(BuildContext context) {
-    final dark = Theme.of(context).brightness == Brightness.dark;
-    final border = dark ? Colors.white12 : const Color(0xFFE4E9E5);
-    return Container(
-      decoration: BoxDecoration(
-        color: dark ? const Color(0xFF151F1C) : Colors.white,
-        borderRadius: BorderRadius.circular(18),
-        border: Border.all(color: border),
-      ),
-      padding: const EdgeInsets.all(12),
-      child: Column(
+  Widget build(BuildContext context) => Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           const LocalizedText(
@@ -1911,29 +2500,46 @@ class _ConnectionModeSelector extends StatelessWidget {
             style: TextStyle(fontSize: 10, letterSpacing: 1.3, fontWeight: FontWeight.w800, color: _muted),
           ),
           const SizedBox(height: 9),
-          SegmentedButton<bool>(
+          SegmentedButton<String>(
             showSelectedIcon: false,
             style: const ButtonStyle(visualDensity: VisualDensity.compact),
             segments: const [
-              ButtonSegment<bool>(
-                value: false,
-                icon: Icon(Icons.auto_awesome_rounded, size: 17),
+              ButtonSegment<String>(
+                value: 'auto',
+                icon: Icon(Icons.auto_awesome_rounded, size: 16),
                 label: LocalizedText('Automatic'),
               ),
-              ButtonSegment<bool>(
-                value: true,
-                icon: Icon(Icons.key_rounded, size: 17),
+              ButtonSegment<String>(
+                value: 'cdn',
+                icon: Icon(Icons.public_rounded, size: 16),
+                label: LocalizedText('CDN Fronting'),
+              ),
+              ButtonSegment<String>(
+                value: 'personal',
+                icon: Icon(Icons.key_rounded, size: 16),
                 label: LocalizedText('Personal'),
               ),
             ],
-            selected: <bool>{personalMode},
+            selected: <String>{
+              personalMode
+                  ? 'personal'
+                  : cdnProtocolSelected
+                      ? 'cdn'
+                      : 'auto',
+            },
             onSelectionChanged: enabled
                 ? (selection) {
                     if (selection.isEmpty) return;
-                    if (selection.single) {
-                      onUsePersonalProfile();
-                    } else {
-                      onUseAutomaticPool();
+                    switch (selection.single) {
+                      case 'auto':
+                        onUseAutomaticPool();
+                        break;
+                      case 'cdn':
+                        onOpenConnectionProtocol();
+                        break;
+                      case 'personal':
+                        onUsePersonalProfile();
+                        break;
                     }
                   }
                 : null,
@@ -1942,7 +2548,9 @@ class _ConnectionModeSelector extends StatelessWidget {
           LocalizedText(
             personalMode
                 ? 'Use a server or subscription you imported.'
-                : 'Connect automatically using the supplied server pool.',
+                : cdnProtocolSelected
+                    ? 'CDN Fronting is selected. Saved CDN settings remain available until Auto is selected.'
+                    : 'Connect automatically using the supplied server pool.',
             style: const TextStyle(fontSize: 11, color: _muted),
           ),
           if (personalMode) ...[
@@ -1957,9 +2565,7 @@ class _ConnectionModeSelector extends StatelessWidget {
             ),
           ],
         ],
-      ),
-    );
-  }
+      );
 }
 
 class _MetricRow extends StatelessWidget {
@@ -2167,6 +2773,7 @@ class _ProfilesPage extends StatelessWidget {
     required this.onRefreshSubscription,
     required this.onTestSubscriptionPings,
     required this.onCancelSubscriptionPings,
+    required this.onRemoveNoPingProfiles,
     required this.pingingSubscriptionId,
     required this.pingBatchCompleted,
     required this.pingBatchTotal,
@@ -2198,6 +2805,7 @@ class _ProfilesPage extends StatelessWidget {
   final Future<void> Function(SavedSubscription) onRefreshSubscription;
   final Future<void> Function(SavedSubscription) onTestSubscriptionPings;
   final VoidCallback onCancelSubscriptionPings;
+  final Future<void> Function(SavedSubscription) onRemoveNoPingProfiles;
   final String? pingingSubscriptionId;
   final int pingBatchCompleted;
   final int pingBatchTotal;
@@ -2282,7 +2890,14 @@ class _ProfilesPage extends StatelessWidget {
     final dark = Theme.of(context).brightness == Brightness.dark;
     final customSubscriptions = subscriptions;
     return ListView(padding: const EdgeInsets.fromLTRB(20, 18, 20, 28), children: [
-      LocalizedText('Servers', style: Theme.of(context).textTheme.headlineMedium?.copyWith(fontWeight: FontWeight.w800)),
+      Row(children: [
+        Expanded(child: LocalizedText('Servers', style: Theme.of(context).textTheme.headlineMedium?.copyWith(fontWeight: FontWeight.w800))),
+        IconButton(
+          tooltip: context.tr('Server information'),
+          onPressed: () => _showServerInformation(context),
+          icon: Icon(Icons.info_outline_rounded, color: secureStorageNeedsRepair ? _coral : null),
+        ),
+      ]),
       const SizedBox(height: 6),
       const LocalizedText('Add your subscription, refresh servers, and choose a route.', style: TextStyle(color: _muted)),
       const SizedBox(height: 18),
@@ -2290,28 +2905,6 @@ class _ProfilesPage extends StatelessWidget {
         const Expanded(child: LocalizedText('My subscriptions', style: TextStyle(fontSize: 17, fontWeight: FontWeight.w800))),
         TextButton.icon(onPressed: connected || subscriptionBusy ? null : onAddSubscription, icon: const Icon(Icons.add_rounded), label: const LocalizedText('Add')),
       ]),
-      if (secureStorageNotice)
-        Card(
-          color: dark ? const Color(0xFF3A2C1D) : const Color(0xFFFFF1E5),
-          child: ListTile(
-            leading: const Icon(Icons.warning_amber_rounded, color: _coral),
-            title: LocalizedText(secureStorageNeedsRepair
-                ? 'Secure storage unavailable'
-                : 'Encrypted storage notice'),
-            subtitle: LocalizedText(secureStorageNeedsRepair
-                ? 'A secure save could not be verified. Do not close the app until the save succeeds; unreadable records were not deleted.'
-                : legacyDataUnavailable
-                    ? 'Older encrypted records remain untouched but could not be read. New saves use a separate encrypted store; re-add any missing items.'
-                    : storageNamespaceRotated
-                        ? 'Storage was moved to an isolated encrypted namespace. Existing data was left untouched and new saves are verified.'
-                        : 'Encrypted records were left untouched. New records are saved only after secure read-back verification.'),
-            trailing: IconButton(
-              tooltip: context.tr('Secure storage information'),
-              onPressed: subscriptionBusy ? null : onRepairSecureStorage,
-              icon: const Icon(Icons.info_outline_rounded),
-            ),
-          ),
-        ),
       if (customSubscriptions.isEmpty)
         const Padding(
           padding: EdgeInsets.only(bottom: 8),
@@ -2381,6 +2974,17 @@ class _ProfilesPage extends StatelessWidget {
                             .map((index) => _profileCard(context, index, dark))
                             .toList(),
               ),
+              if (indices.any(failedPings.contains))
+                Align(
+                  alignment: AlignmentDirectional.centerEnd,
+                  child: TextButton.icon(
+                    onPressed: connected || subscriptionBusy || isPinging
+                        ? null
+                        : () => onRemoveNoPingProfiles(subscription),
+                    icon: const Icon(Icons.filter_alt_off_outlined, size: 17),
+                    label: LocalizedText('Remove profiles without ping (${indices.where(failedPings.contains).length})'),
+                  ),
+                ),
             ]),
           );
         }),
@@ -2399,9 +3003,55 @@ class _ProfilesPage extends StatelessWidget {
             .where((i) => i >= profileSources.length || profileSources[i] == null)
             .map((index) => _profileCard(context, index, dark)),
       ],
-      const SizedBox(height: 12),
-      const LocalizedText('Profile configurations are encrypted in Android secure storage on this device. If secure storage is unavailable, changes remain session-only and the app shows a diagnostic code. Do not share screenshots or logs that reveal a server address.', style: TextStyle(fontSize: 12, color: _muted, height: 1.45)),
     ]);
+  }
+
+  void _showServerInformation(BuildContext context) {
+    final storageTitle = secureStorageNeedsRepair
+        ? 'Secure storage unavailable'
+        : 'Encrypted storage notice';
+    final storageMessage = secureStorageNeedsRepair
+        ? 'A secure save could not be verified. Do not close the app until the save succeeds; unreadable records were not deleted.'
+        : legacyDataUnavailable
+            ? 'Older encrypted records remain untouched but could not be read. New saves use a separate encrypted store; re-add any missing items.'
+            : storageNamespaceRotated
+                ? 'Storage was moved to an isolated encrypted namespace. Existing data was left untouched and new saves are verified.'
+                : 'Encrypted records were left untouched. New records are saved only after secure read-back verification.';
+    showDialog<void>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: LocalizedText(secureStorageNotice ? storageTitle : 'Server information'),
+        content: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              if (secureStorageNotice) ...[
+                LocalizedText(storageMessage),
+                const SizedBox(height: 12),
+              ],
+              const LocalizedText('Profile configurations are encrypted in Android secure storage on this device. If secure storage is unavailable, changes remain session-only and the app shows a diagnostic code. Do not share screenshots or logs that reveal a server address.'),
+            ],
+          ),
+        ),
+        actions: [
+          if (secureStorageNeedsRepair)
+            TextButton(
+              onPressed: subscriptionBusy
+                  ? null
+                  : () {
+                      Navigator.of(dialogContext).pop();
+                      onRepairSecureStorage();
+                    },
+              child: const LocalizedText('Repair secure storage'),
+            ),
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(),
+            child: const LocalizedText('Close'),
+          ),
+        ],
+      ),
+    );
   }
 }
 
@@ -2425,9 +3075,10 @@ class _EmptyCard extends StatelessWidget {
 }
 
 class _InstalledApp {
-  const _InstalledApp(this.packageName, this.label);
+  const _InstalledApp(this.packageName, this.label, this.iconBytes);
   final String packageName;
   final String label;
+  final Uint8List? iconBytes;
 }
 
 class _SettingsPage extends StatelessWidget {
@@ -2446,6 +3097,7 @@ class _SettingsPage extends StatelessWidget {
     required this.onThemeChanged,
     required this.onEditAppRouting,
     required this.excludedAppsCount,
+    required this.onOpenConnectionProtocol,
   });
 
   final Locale locale;
@@ -2462,10 +3114,18 @@ class _SettingsPage extends StatelessWidget {
   final ValueChanged<bool> onThemeChanged;
   final VoidCallback onEditAppRouting;
   final int excludedAppsCount;
+  final VoidCallback onOpenConnectionProtocol;
 
   @override
   Widget build(BuildContext context) => ListView(padding: const EdgeInsets.fromLTRB(20, 18, 20, 28), children: [
-        LocalizedText('Settings', style: Theme.of(context).textTheme.headlineMedium?.copyWith(fontWeight: FontWeight.w800)),
+        Row(children: [
+          Expanded(child: LocalizedText('Settings', style: Theme.of(context).textTheme.headlineMedium?.copyWith(fontWeight: FontWeight.w800))),
+          IconButton(
+            tooltip: context.tr('Platform scope information'),
+            onPressed: () => _showPlatformScopeInformation(context),
+            icon: const Icon(Icons.info_outline_rounded),
+          ),
+        ]),
         const SizedBox(height: 6),
         const LocalizedText('Appearance settings work now; Android VPN connection is managed from Connect.', style: TextStyle(color: _muted)),
         const SizedBox(height: 20),
@@ -2504,6 +3164,14 @@ class _SettingsPage extends StatelessWidget {
             onTap: onEditAppRouting,
           ),
           const Divider(height: 1, indent: 16, endIndent: 16),
+          ListTile(
+            leading: const Icon(Icons.hub_rounded),
+            title: const LocalizedText('Connection protocol'),
+            subtitle: const LocalizedText('Auto or optional CDN Fronting settings'),
+            trailing: const Icon(Icons.chevron_right_rounded),
+            onTap: onOpenConnectionProtocol,
+          ),
+          const Divider(height: 1, indent: 16, endIndent: 16),
           SwitchListTile(
             secondary: const Icon(Icons.auto_awesome_rounded),
             title: const LocalizedText('Automatic server pool'),
@@ -2522,23 +3190,705 @@ class _SettingsPage extends StatelessWidget {
                   },
           ),
         ])),
-        const SizedBox(height: 16),
-        Container(
-          padding: const EdgeInsets.all(16),
-          decoration: BoxDecoration(
-            color: Theme.of(context).brightness == Brightness.dark ? const Color(0xFF29221F) : const Color(0xFFFFF1E8),
-            border: Theme.of(context).brightness == Brightness.dark ? Border.all(color: const Color(0xFF594038)) : null,
-            borderRadius: BorderRadius.circular(20),
-          ),
-          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-            LocalizedText('Platform scope', style: TextStyle(fontWeight: FontWeight.w800, color: Theme.of(context).brightness == Brightness.dark ? const Color(0xFFFFB29B) : const Color(0xFF8A5548))),
-            const SizedBox(height: 8),
-            LocalizedText('Android VPN sessions route system DNS through the selected proxy. You can exclude selected launcher apps from the VPN. iPhone still needs its Network Extension project, Apple signing, and device testing. A kill switch, auto-connect, and trusted country lookup are not enabled in this build.', style: TextStyle(fontSize: 12, height: 1.5, color: Theme.of(context).brightness == Brightness.dark ? const Color(0xFFE6C7BC) : const Color(0xFF8A5548))),
-          ]),
-        ),
         const SizedBox(height: 20),
         const ListTile(leading: _BrandMark(), title: LocalizedText('V2rayAG'), subtitle: LocalizedText('Source: Telegram @V2rayAG\nDeveloper: V2rayAG telegram channel and HashtagAlireza')),
       ]);
+
+  void _showPlatformScopeInformation(BuildContext context) {
+    showDialog<void>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const LocalizedText('Platform scope'),
+        content: const SingleChildScrollView(
+          child: LocalizedText(
+            'Android VPN sessions route system DNS through the selected proxy. You can exclude selected launcher apps from the VPN. iPhone still needs its Network Extension project, Apple signing, and device testing. A kill switch, auto-connect, and trusted country lookup are not enabled in this build.',
+            style: TextStyle(height: 1.5),
+          ),
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.of(dialogContext).pop(), child: const LocalizedText('Close')),
+        ],
+      ),
+    );
+  }
+}
+
+class _ConnectionProtocolPage extends StatefulWidget {
+  const _ConnectionProtocolPage({
+    required this.settings,
+    required this.locked,
+    required this.onSave,
+    required this.onBack,
+    super.key,
+  });
+
+  final CdnFrontingSettings settings;
+  final bool locked;
+  final Future<bool> Function(CdnFrontingSettings) onSave;
+  final VoidCallback onBack;
+
+  @override
+  State<_ConnectionProtocolPage> createState() => _ConnectionProtocolPageState();
+}
+
+class _ConnectionProtocolPageState extends State<_ConnectionProtocolPage> {
+  late final TextEditingController _ipsController;
+  late final TextEditingController _sniController;
+  late ConnectionProtocol _selectedProtocol;
+  bool _saving = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _selectedProtocol = widget.settings.protocol;
+    _ipsController = TextEditingController(text: widget.settings.cdnIps);
+    _sniController = TextEditingController(text: widget.settings.sniHostname);
+  }
+
+  @override
+  void didUpdateWidget(covariant _ConnectionProtocolPage oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.settings.protocol != widget.settings.protocol) {
+      _selectedProtocol = widget.settings.protocol;
+    }
+    if (oldWidget.settings.cdnIps != widget.settings.cdnIps) {
+      _ipsController.text = widget.settings.cdnIps;
+    }
+    if (oldWidget.settings.sniHostname != widget.settings.sniHostname) {
+      _sniController.text = widget.settings.sniHostname;
+    }
+  }
+
+  @override
+  void dispose() {
+    _ipsController.dispose();
+    _sniController.dispose();
+    super.dispose();
+  }
+
+  Future<void> _save(ConnectionProtocol protocol) async {
+    if (widget.locked || _saving) return;
+    setState(() => _saving = true);
+    try {
+      final settings = protocol == ConnectionProtocol.auto
+          ? CdnFrontingSettings(
+              protocol: ConnectionProtocol.auto,
+              cdnIps: widget.settings.cdnIps,
+              sniHostname: widget.settings.sniHostname,
+            )
+          : CdnFrontingSettings(
+              protocol: protocol,
+              cdnIps: _ipsController.text,
+              sniHostname: _sniController.text,
+            ).validated();
+      final saved = await widget.onSave(settings);
+      if (saved && mounted) {
+        setState(() {
+          _selectedProtocol = protocol;
+          _ipsController.text = settings.cdnIps;
+          _sniController.text = settings.sniHostname;
+        });
+      }
+    } on FormatException catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: LocalizedText(error.message)),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _saving = false);
+    }
+  }
+
+  Future<void> _openCdnScanner({required bool scanIps}) async {
+    if (widget.locked || _saving) return;
+    final value = await showModalBottomSheet<String>(
+      context: context,
+      isScrollControlled: true,
+      useSafeArea: true,
+      backgroundColor: Theme.of(context).colorScheme.surface,
+      builder: (_) => _CdnScannerSheet(
+        scanIps: scanIps,
+        currentIps: _ipsController.text,
+        currentSni: _sniController.text,
+      ),
+    );
+    if (!mounted || value == null || value.trim().isEmpty) return;
+    setState(() {
+      if (scanIps) {
+        _ipsController.text = value;
+      } else {
+        _sniController.text = value.trim();
+      }
+      _selectedProtocol = ConnectionProtocol.cdnFronting;
+    });
+  }
+
+  Widget _protocolOption({
+    required ConnectionProtocol protocol,
+    required String label,
+    required String subtitle,
+    required VoidCallback onTap,
+  }) {
+    final selected = _selectedProtocol == protocol;
+    return Semantics(
+      selected: selected,
+      button: true,
+      child: ListTile(
+        selected: selected,
+        leading: Icon(
+          selected ? Icons.radio_button_checked_rounded : Icons.radio_button_off_rounded,
+          color: selected ? Theme.of(context).colorScheme.primary : _muted,
+        ),
+        title: LocalizedText(label),
+        subtitle: LocalizedText(subtitle),
+        onTap: widget.locked || _saving ? null : onTap,
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) => ListView(
+        padding: const EdgeInsets.fromLTRB(20, 18, 20, 28),
+        children: [
+          Row(children: [
+            IconButton(
+              tooltip: context.tr('Back to settings'),
+              onPressed: widget.onBack,
+              icon: const Icon(Icons.arrow_back_rounded),
+            ),
+            Expanded(
+              child: LocalizedText(
+                'Connection protocol',
+                style: Theme.of(context).textTheme.headlineMedium?.copyWith(
+                      fontWeight: FontWeight.w800,
+                    ),
+              ),
+            ),
+          ]),
+          const SizedBox(height: 6),
+          const Padding(
+            padding: EdgeInsets.symmetric(horizontal: 12),
+            child: LocalizedText(
+              'Auto and CDN Fronting are separate saved choices. Switching to Auto disables CDN mode but keeps the saved IP/SNI fields for later.',
+              style: TextStyle(color: _muted, height: 1.4),
+            ),
+          ),
+          const SizedBox(height: 16),
+          Card(
+            elevation: 0,
+            color: Theme.of(context).colorScheme.surface,
+            child: Column(children: [
+              _protocolOption(
+                protocol: ConnectionProtocol.auto,
+                label: 'Auto',
+                subtitle: 'Use the existing automatic connection method with no CDN overrides.',
+                onTap: () => _save(ConnectionProtocol.auto),
+              ),
+              const Divider(height: 1, indent: 16, endIndent: 16),
+              _protocolOption(
+                protocol: ConnectionProtocol.cdnFronting,
+                label: 'CDN Fronting',
+                subtitle: 'Optional CDN IP and TLS SNI overrides for compatible automatic servers. Selecting it uses the automatic pool, not personal profiles.',
+                onTap: () => setState(() => _selectedProtocol = ConnectionProtocol.cdnFronting),
+              ),
+            ]),
+          ),
+          if (_selectedProtocol == ConnectionProtocol.cdnFronting) ...[
+            const SizedBox(height: 14),
+            Card(
+              elevation: 0,
+              color: Theme.of(context).colorScheme.surface,
+              child: Padding(
+                padding: const EdgeInsets.all(18),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const LocalizedText(
+                      'CDN IPs',
+                      style: TextStyle(fontWeight: FontWeight.w700),
+                    ),
+                    const SizedBox(height: 8),
+                    TextField(
+                      controller: _ipsController,
+                      enabled: !widget.locked && !_saving,
+                      minLines: 2,
+                      maxLines: 4,
+                      keyboardType: TextInputType.multiline,
+                      autocorrect: false,
+                      enableSuggestions: false,
+                      decoration: InputDecoration(
+                        hintText: context.tr('One IP per line, or separate with commas'),
+                        border: const OutlineInputBorder(),
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    Align(
+                      alignment: AlignmentDirectional.centerEnd,
+                      child: OutlinedButton.icon(
+                        onPressed: widget.locked || _saving
+                            ? null
+                            : () => _openCdnScanner(scanIps: true),
+                        icon: const Icon(Icons.radar_rounded),
+                        label: const LocalizedText('Scan IPs'),
+                      ),
+                    ),
+                    const SizedBox(height: 18),
+                    const LocalizedText(
+                      'CDN SNI hostname',
+                      style: TextStyle(fontWeight: FontWeight.w700),
+                    ),
+                    const SizedBox(height: 8),
+                    TextField(
+                      controller: _sniController,
+                      enabled: !widget.locked && !_saving,
+                      keyboardType: TextInputType.url,
+                      autocorrect: false,
+                      enableSuggestions: false,
+                      decoration: InputDecoration(
+                        hintText: context.tr('example.com'),
+                        border: const OutlineInputBorder(),
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    Align(
+                      alignment: AlignmentDirectional.centerEnd,
+                      child: OutlinedButton.icon(
+                        onPressed: widget.locked || _saving
+                            ? null
+                            : () => _openCdnScanner(scanIps: false),
+                        icon: const Icon(Icons.domain_verification_rounded),
+                        label: const LocalizedText('Scan SNI domains'),
+                      ),
+                    ),
+                    const SizedBox(height: 12),
+                    const LocalizedText(
+                      'Empty fields keep CDN selected and never switch to Auto. This build has no default Meek engine, so an empty-field CDN connection cannot start. Saved overrides are applied only to compatible TLS WebSocket profiles; this is not independent Meek.',
+                      style: TextStyle(color: _muted, fontSize: 12, height: 1.4),
+                    ),
+                    const SizedBox(height: 16),
+                    SizedBox(
+                      width: double.infinity,
+                      child: FilledButton.icon(
+                        onPressed: widget.locked || _saving
+                            ? null
+                            : () => _save(ConnectionProtocol.cdnFronting),
+                        icon: _saving
+                            ? const SizedBox(
+                                width: 18,
+                                height: 18,
+                                child: CircularProgressIndicator(strokeWidth: 2),
+                              )
+                            : const Icon(Icons.save_rounded),
+                        label: const LocalizedText('Save'),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ],
+          if (widget.locked) ...[
+            const SizedBox(height: 12),
+            const LocalizedText(
+              'Disconnect before changing connection protocol.',
+              style: TextStyle(color: _coral),
+              textAlign: TextAlign.center,
+            ),
+          ],
+        ],
+      );
+}
+
+class _TermsSecurityPage extends StatelessWidget {
+  const _TermsSecurityPage({required this.onOpenTelegramChannel});
+
+  final VoidCallback onOpenTelegramChannel;
+
+  @override
+  Widget build(BuildContext context) => ListView(
+        padding: const EdgeInsets.fromLTRB(20, 18, 20, 28),
+        children: [
+          LocalizedText(
+            'Terms & security',
+            style: Theme.of(context)
+                .textTheme
+                .headlineMedium
+                ?.copyWith(fontWeight: FontWeight.w800),
+          ),
+          const SizedBox(height: 8),
+          const LocalizedText(
+            'Clear information about what this app does and what it does not promise.',
+            style: TextStyle(color: _muted),
+          ),
+          const SizedBox(height: 18),
+          const _LegalSection(
+            title: 'VPN operation',
+            body:
+                'The app uses Android VPN permission and a native Xray-based engine to route network traffic through the profile you choose. Android and installed apps keep their normal system permissions. A VPN does not make a device immune to malware or tracking.',
+          ),
+          const _LegalSection(
+            title: 'Personal subscriptions',
+            body:
+                'Subscription URLs and imported profile configurations are stored in Android encrypted secure storage when available. Subscription URLs are fetched from the provider over HTTPS. The app does not send personal profiles to the automatic server pool; imported profile data is handed to the native VPN engine when you connect.',
+          ),
+          const _LegalSection(
+            title: 'Automatic server pool',
+            body:
+                'Automatic mode contacts the V2rayAG server-pool service over HTTPS to enroll the app instance, request a server lease, and release it when finished. The service receives the platform marker and an opaque access token required for this operation and returns a server profile. Use Personal mode if you do not want to use the automatic pool.',
+          ),
+          const _LegalSection(
+            title: 'CDN Fronting status',
+            body:
+                'CDN Fronting in this build applies optional IP/SNI overrides only to compatible TLS WebSocket profiles. It is not a Meek engine. Empty fields do not enable Meek and must not be interpreted as a successful CDN tunnel.',
+          ),
+          const _LegalSection(
+            title: 'Use and limitations',
+            body:
+                'Use only servers and subscriptions you are authorized to use, and follow local laws and provider terms. VPN providers and destination services may observe connection metadata or traffic. The app does not guarantee anonymity, uninterrupted access, or a specific ping or country result.',
+          ),
+          const SizedBox(height: 8),
+          FilledButton.tonalIcon(
+            onPressed: onOpenTelegramChannel,
+            icon: const Icon(Icons.send_outlined),
+            label: const LocalizedText('Join Telegram channel'),
+          ),
+        ],
+      );
+}
+
+class _LegalSection extends StatelessWidget {
+  const _LegalSection({required this.title, required this.body});
+
+  final String title;
+  final String body;
+
+  @override
+  Widget build(BuildContext context) => Card(
+        elevation: 0,
+        margin: const EdgeInsets.only(bottom: 10),
+        color: Theme.of(context).colorScheme.surface,
+        child: Padding(
+          padding: const EdgeInsets.all(16),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              LocalizedText(
+                title,
+                style: const TextStyle(fontWeight: FontWeight.w700),
+              ),
+              const SizedBox(height: 7),
+              LocalizedText(body, style: const TextStyle(height: 1.5)),
+            ],
+          ),
+        ),
+      );
+}
+
+class _CdnScannerSheet extends StatefulWidget {
+  const _CdnScannerSheet({
+    required this.scanIps,
+    required this.currentIps,
+    required this.currentSni,
+  });
+
+  final bool scanIps;
+  final String currentIps;
+  final String currentSni;
+
+  @override
+  State<_CdnScannerSheet> createState() => _CdnScannerSheetState();
+}
+
+class _CdnScannerSheetState extends State<_CdnScannerSheet> {
+  bool _scanning = false;
+  bool _cancelRequested = false;
+  String? _error;
+  CdnScanReport? _report;
+  CdnScanProgress _progress = const CdnScanProgress(
+    completed: 0,
+    total: 0,
+    reachable: 0,
+    tcpReachable: 0,
+    failed: 0,
+  );
+
+  Future<void> _startScan() async {
+    if (_scanning) return;
+    setState(() {
+      _scanning = true;
+      _cancelRequested = false;
+      _error = null;
+      _report = null;
+      _progress = const CdnScanProgress(completed: 0, total: 0, reachable: 0, tcpReachable: 0, failed: 0);
+    });
+    try {
+      final scanner = CdnEndpointScanner();
+      final report = widget.scanIps
+          ? await scanner.scanIps(
+              preferredSni: widget.currentSni,
+              isCancelled: () => _cancelRequested,
+              onProgress: (progress) {
+                if (mounted) setState(() => _progress = progress);
+              },
+            )
+          : await scanner.scanSni(
+              currentSni: widget.currentSni,
+              cdnIps: widget.currentIps,
+              isCancelled: () => _cancelRequested,
+              onProgress: (progress) {
+                if (mounted) setState(() => _progress = progress);
+              },
+            );
+      if (mounted) setState(() => _report = report);
+    } on CdnScanCancelled {
+      if (mounted) setState(() => _error = 'Scan stopped.');
+    } on FormatException catch (error) {
+      if (mounted) setState(() => _error = error.message);
+    } on Object {
+      if (mounted) setState(() => _error = 'Scan could not finish. Check the current network and try again.');
+    } finally {
+      if (mounted) setState(() => _scanning = false);
+    }
+  }
+
+  Future<void> _copy(String value) async {
+    try {
+      await Clipboard.setData(ClipboardData(text: value));
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: LocalizedText('Copied to clipboard.')),
+        );
+      }
+    } on Object {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: LocalizedText('Could not copy the result.')),
+        );
+      }
+    }
+  }
+
+  void _use(String value) => Navigator.of(context).pop(value);
+
+  List<CdnScanCandidate> get _candidates => _report?.candidates ?? const [];
+
+  String get _allValues {
+    final values = _candidates
+        .take(widget.scanIps ? 20 : 8)
+        .map((candidate) => candidate.value)
+        .toList(growable: false);
+    return values.join(widget.scanIps ? ', ' : '\n');
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = Theme.of(context).colorScheme;
+    final title = widget.scanIps ? 'Scan CDN IPs' : 'Scan SNI domains';
+    final report = _report;
+    return FractionallySizedBox(
+      heightFactor: 0.9,
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(20, 10, 20, 16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Center(
+              child: Container(
+                width: 42,
+                height: 4,
+                decoration: BoxDecoration(
+                  color: colors.outlineVariant,
+                  borderRadius: BorderRadius.circular(4),
+                ),
+              ),
+            ),
+            const SizedBox(height: 16),
+            Row(children: [
+              AnimatedContainer(
+                duration: const Duration(milliseconds: 260),
+                width: 44,
+                height: 44,
+                decoration: BoxDecoration(
+                  color: _scanning ? colors.primaryContainer : colors.surfaceContainerHighest,
+                  borderRadius: BorderRadius.circular(15),
+                ),
+                child: _scanning
+                    ? Padding(
+                        padding: const EdgeInsets.all(12),
+                        child: CircularProgressIndicator(
+                          strokeWidth: 2.5,
+                          color: colors.primary,
+                        ),
+                      )
+                    : Icon(Icons.radar_rounded, color: colors.primary),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: LocalizedText(
+                  title,
+                  style: Theme.of(context).textTheme.titleLarge?.copyWith(
+                        fontWeight: FontWeight.w800,
+                      ),
+                ),
+              ),
+              IconButton(
+                tooltip: context.tr('Close'),
+                onPressed: _scanning ? () => setState(() => _cancelRequested = true) : () => Navigator.pop(context),
+                icon: Icon(_scanning ? Icons.stop_circle_outlined : Icons.close_rounded),
+              ),
+            ]),
+            const SizedBox(height: 12),
+            const LocalizedText(
+              'The scan uses live DNS, a real TCP 443 connect-time measurement, and TLS. It does not prove that an IP/SNI pair can carry this VPN server.',
+              style: TextStyle(color: _muted, height: 1.35),
+            ),
+            const SizedBox(height: 12),
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: colors.surfaceContainerHighest.withValues(alpha: 0.55),
+                borderRadius: BorderRadius.circular(14),
+              ),
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.spaceAround,
+                children: [
+                  _ScanMetric(label: 'Scanned', value: '${_progress.completed}/${_progress.total}'),
+                  _ScanMetric(label: 'Remaining', value: '${(_progress.total - _progress.completed).clamp(0, _progress.total)}'),
+                  _ScanMetric(label: 'TCP open', value: '${_progress.tcpReachable}'),
+                  _ScanMetric(label: 'TLS OK', value: '${_progress.reachable}'),
+                ],
+              ),
+            ),
+            if (_scanning) ...[
+              const SizedBox(height: 12),
+              LinearProgressIndicator(
+                value: _progress.total == 0
+                    ? null
+                    : (_progress.completed / _progress.total).clamp(0.0, 1.0).toDouble(),
+                minHeight: 5,
+                borderRadius: BorderRadius.circular(4),
+              ),
+            ],
+            const SizedBox(height: 10),
+            Row(children: [
+              Expanded(
+                child: FilledButton.icon(
+                  onPressed: _scanning ? null : _startScan,
+                  icon: Icon(_scanning ? Icons.hourglass_top_rounded : Icons.radar_rounded),
+                  label: LocalizedText(_scanning ? 'Scanning…' : 'Start scan'),
+                ),
+              ),
+              const SizedBox(width: 8),
+              OutlinedButton.icon(
+                onPressed: _scanning || _candidates.isEmpty
+                    ? null
+                    : () => _copy(_allValues),
+                icon: const Icon(Icons.copy_all_rounded),
+                label: const LocalizedText('Copy all'),
+              ),
+            ]),
+            const SizedBox(height: 8),
+            if (_error != null)
+              Padding(
+                padding: const EdgeInsets.symmetric(vertical: 8),
+                child: LocalizedText(
+                  _error!,
+                  style: TextStyle(color: _error == 'Scan stopped.' ? _muted : colors.error),
+                ),
+              ),
+            if (report != null && report.candidates.isEmpty)
+              const Padding(
+                padding: EdgeInsets.symmetric(vertical: 12),
+                child: LocalizedText('No TLS-reachable candidate was found on this network.'),
+              ),
+            Expanded(
+              child: report == null || report.candidates.isEmpty
+                  ? Center(
+                      child: AnimatedSwitcher(
+                        duration: const Duration(milliseconds: 220),
+                        child: _scanning
+                            ? Column(
+                                key: const ValueKey('scan-animation'),
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  const Icon(Icons.public_rounded, size: 34, color: _muted),
+                                  const SizedBox(height: 8),
+                                  const LocalizedText('Resolving current Akamai candidates…'),
+                                ],
+                              )
+                            : const LocalizedText(
+                                'Start a scan to test Akamai candidates on this network.',
+                                key: ValueKey('scan-idle'),
+                                style: TextStyle(color: _muted),
+                                textAlign: TextAlign.center,
+                              ),
+                      ),
+                    )
+                  : ListView.separated(
+                      itemCount: report.candidates.length,
+                      separatorBuilder: (_, __) => const Divider(height: 1),
+                      itemBuilder: (context, index) {
+                        final candidate = report.candidates[index];
+                        return ListTile(
+                          dense: true,
+                          contentPadding: EdgeInsets.zero,
+                          // Reachability is not proof of VPN/CDN tunnel compatibility.
+                          leading: Icon(Icons.info_outline_rounded, color: colors.primary),
+                          title: SelectableText(candidate.value),
+                          subtitle: Text('${context.tr('TCP 443 response')} · ${candidate.tcpLatencyMs} ms  |  ${context.tr('TLS handshake')} · ${candidate.tlsHandshakeMs} ms'),
+                          trailing: Wrap(
+                            spacing: 0,
+                            crossAxisAlignment: WrapCrossAlignment.center,
+                            children: [
+                              IconButton(
+                                tooltip: context.tr('Copy'),
+                                onPressed: () => _copy(candidate.value),
+                                icon: const Icon(Icons.copy_rounded),
+                              ),
+                              TextButton(
+                                onPressed: () => _use(candidate.value),
+                                child: const LocalizedText('Use'),
+                              ),
+                            ],
+                          ),
+                        );
+                      },
+                    ),
+            ),
+            if (report != null && report.candidates.isNotEmpty)
+              SizedBox(
+                width: double.infinity,
+                child: FilledButton.tonalIcon(
+                  onPressed: () => _use(widget.scanIps
+                      ? report.candidates.take(20).map((item) => item.value).join(', ')
+                      : report.candidates.first.value),
+                  icon: const Icon(Icons.input_rounded),
+                  label: LocalizedText(widget.scanIps ? 'Use all results' : 'Use fastest SNI'),
+                ),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _ScanMetric extends StatelessWidget {
+  const _ScanMetric({required this.label, required this.value});
+
+  final String label;
+  final String value;
+
+  @override
+  Widget build(BuildContext context) => Column(
+        children: [
+          Text(value, style: Theme.of(context).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w800)),
+          const SizedBox(height: 2),
+          LocalizedText(label, style: const TextStyle(color: _muted, fontSize: 11)),
+        ],
+      );
 }
 
 Future<String?> _readClipboard(BuildContext context) async {

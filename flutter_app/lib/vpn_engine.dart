@@ -75,16 +75,24 @@ class VpnEngine extends ChangeNotifier {
     'https://api.telegram.org/',
     'https://telegram.org/',
   ];
-  // General route checks are kept separate: a healthy Instagram/web route is
-  // useful as a clearly unverified fallback, but must not outrank a candidate
-  // that actually answers the Telegram probe.
+  // Match the widely used true-delay endpoint while keeping a second HTTPS
+  // endpoint as a fallback. A blocked Telegram route must not mark an otherwise
+  // usable profile as unresponsive in the subscription latency list.
+  static const _realDelayProbeUrls = <String>[
+    'https://www.gstatic.com/generate_204',
+    'https://www.google.com/generate_204',
+  ];
+  // General route checks are kept separate: a healthy web route is useful as a
+  // clearly unverified fallback, but must not outrank a Telegram-responsive
+  // automatic-pool candidate.
   static const _fallbackProbeUrls = <String>[
     'https://www.instagram.com/',
   ];
   static const _probeUrls = <String>[
-    'https://www.instagram.com/',
-    'https://cp.cloudflare.com/generate_204',
+    'https://www.gstatic.com/generate_204',
     'https://www.google.com/generate_204',
+    'https://cp.cloudflare.com/generate_204',
+    'https://www.instagram.com/',
   ];
 
   VlessStatus _status = VlessStatus();
@@ -581,6 +589,74 @@ class VpnEngine extends ChangeNotifier {
     }
   }
 
+  /// Runs a bounded batch of independent Xray delay probes. Android's pinned
+  /// plugin is patched in the release workflow with a four-worker native pool;
+  /// limiting callers here prevents unbounded temporary Xray processes.
+  Future<List<int?>> measureBatchPings(
+    List<VpnProfile> profiles, {
+    int concurrency = 4,
+    required bool Function() shouldCancel,
+    required void Function(int index, int? result) onResult,
+  }) async {
+    if (profiles.isEmpty || !_initialized || _busy || _pingBusy || connected ||
+        connecting || disconnecting) {
+      return const <int?>[];
+    }
+    final generation = ++_pingGeneration;
+    final results = List<int?>.filled(profiles.length, null);
+    var nextIndex = 0;
+    var hadProbeError = false;
+    final workerCount = (concurrency < 1 ? 1 : concurrency) > profiles.length
+        ? profiles.length
+        : (concurrency < 1 ? 1 : concurrency);
+    _busy = true;
+    _pingBusy = true;
+    _phase = 'latency-batch';
+    _failureCategory = null;
+    _message = null;
+    _notify();
+
+    Future<void> worker() async {
+      while (generation == _pingGeneration && !shouldCancel()) {
+        final index = nextIndex++;
+        if (index >= profiles.length) return;
+        int? value;
+        for (final url in _realDelayProbeUrls) {
+          if (generation != _pingGeneration || shouldCancel()) return;
+          try {
+            final measured = await _client
+                .getServerDelay(config: profiles[index].config, url: url)
+                .timeout(const Duration(seconds: 3));
+            if (measured >= 0) {
+              value = measured;
+              break;
+            }
+          } on Object {
+            hadProbeError = true;
+          }
+        }
+        if (generation != _pingGeneration || shouldCancel()) return;
+        results[index] = value;
+        onResult(index, value);
+      }
+    }
+
+    try {
+      await Future.wait(List<Future<void>>.generate(workerCount, (_) => worker()));
+      if (generation == _pingGeneration) {
+        _phase = shouldCancel() ? 'latency-batch-cancelled' : 'latency-batch-complete';
+        _failureCategory = results.every((value) => value == null)
+            ? (hadProbeError ? 'LatencyProbeError' : 'NoDelayResult')
+            : null;
+      }
+      return results;
+    } finally {
+      _busy = false;
+      _pingBusy = false;
+      if (generation == _pingGeneration) _notify();
+    }
+  }
+
   Future<int?> measurePing(
     VpnProfile? profile, {
     bool batchScan = false,
@@ -606,17 +682,21 @@ class VpnEngine extends ChangeNotifier {
     _lastPingConfig = null;
     _notify();
     try {
-      final urls = telegramOnly || automaticSelection || batchScan
+      final urls = telegramOnly || automaticSelection
           ? _telegramProbeUrls
-          : fallbackOnly
-              ? _fallbackProbeUrls
-              : _probeUrls;
+          : batchScan
+              ? _realDelayProbeUrls
+              : fallbackOnly
+                  ? _fallbackProbeUrls
+                  : _probeUrls;
       final timeout = Duration(
         seconds: fallbackOnly
             ? 3
-            : batchScan || automaticSelection || telegramOnly
-                ? 2
-                : 5,
+            : batchScan
+                ? 3
+                : automaticSelection || telegramOnly
+                    ? 2
+                    : 5,
       );
       for (final url in urls) {
         try {

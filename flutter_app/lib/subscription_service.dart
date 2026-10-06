@@ -147,6 +147,24 @@ class _VersionedSecureStorage {
       _active = fallback;
       namespaceRotated = true;
     } else {
+      // A newer namespaced record may be unreadable while the legacy encrypted
+      // store is still usable (for example after an Android Keystore upgrade).
+      // Try that existing encrypted record before declaring the user's data
+      // unavailable. Never clear or overwrite either unreadable namespace.
+      final legacy = _legacy;
+      if (legacy != null) {
+        try {
+          final legacyRaw = await legacy.read(key: key);
+          if (legacyRaw != null) {
+            final legacyRecord = _decode(legacyRaw);
+            _active = legacy;
+            _generations[key] = legacyRecord.generation;
+            return legacyRecord.payload;
+          }
+        } on Object {
+          // Preserve all copies and fail closed if no encrypted store can be read.
+        }
+      }
       Error.throwWithStackTrace(
         primaryError,
         StackTrace.current,

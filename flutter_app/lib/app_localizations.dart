@@ -72,6 +72,41 @@ class V2rayLocalizations {
     if (excluded != null) {
       return '${excluded.group(1)} برنامه از VPN مستثنا شده‌اند';
     }
+    final removePingless = RegExp(r'^Remove profiles without ping \((\d+)\)$')
+        .firstMatch(source);
+    if (removePingless != null) {
+      return 'حذف پروفایل‌های بدون نتیجهٔ پینگ (${removePingless.group(1)})';
+    }
+    final removePinglessConfirmation = RegExp(
+      r'^This will remove (\d+) profiles from this device\. A missing ping result does not prove that a server is offline or cannot connect\.$',
+    ).firstMatch(source);
+    if (removePinglessConfirmation != null) {
+      return 'این کار ${removePinglessConfirmation.group(1)} پروفایل را از این دستگاه حذف می‌کند. نداشتن نتیجهٔ پینگ ثابت نمی‌کند سرور قطع است یا امکان اتصال ندارد.';
+    }
+    final removedPingless = RegExp(
+      r'^Removed (\d+) profiles with no latency result\.$',
+    ).firstMatch(source);
+    if (removedPingless != null) {
+      return '${removedPingless.group(1)} پروفایلِ بدون نتیجهٔ تأخیر حذف شد.';
+    }
+    final savedImported = RegExp(
+      r'^Added (\d+) server profiles and saved them securely\.$',
+    ).firstMatch(source);
+    if (savedImported != null) {
+      return '${savedImported.group(1)} پروفایل سرور به‌شکل امن ذخیره شد.';
+    }
+    final savedSubscriptionProfiles = RegExp(
+      r'^Loaded and saved (\d+) profiles for (.+)\.$',
+    ).firstMatch(source);
+    if (savedSubscriptionProfiles != null) {
+      return '${savedSubscriptionProfiles.group(1)} پروفایل برای اشتراک «${savedSubscriptionProfiles.group(2)}» دریافت و ذخیره شد.';
+    }
+    final profileSaveFailure = RegExp(
+      r'^Profiles could not be saved securely \(([^)]+)\); changes remain only until this app closes\.$',
+    ).firstMatch(source);
+    if (profileSaveFailure != null) {
+      return 'ذخیرهٔ امن پروفایل‌ها ممکن نشد (${profileSaveFailure.group(1)}). تغییرات فقط تا زمان بسته‌شدن برنامه باقی می‌مانند.';
+    }
     final profileLine = source.split('\n');
     if (profileLine.length == 2 &&
         profileLine[1].startsWith('Country not looked up · ')) {
@@ -89,6 +124,20 @@ class V2rayLocalizations {
   }
 
   static const Map<String, String> _persian = {
+    'Terms & security': 'شرایط استفاده و امنیت',
+    'How connection and data handling work': 'نحوهٔ اتصال و مدیریت داده‌ها',
+    'Join Telegram channel': 'پیوستن به کانال تلگرام',
+    'Clear information about what this app does and what it does not promise.': 'اطلاعات روشن دربارهٔ کارکرد برنامه و محدودیت‌های آن.',
+    'VPN operation': 'نحوهٔ کار VPN',
+    'The app uses Android VPN permission and a native Xray-based engine to route network traffic through the profile you choose. Android and installed apps keep their normal system permissions. A VPN does not make a device immune to malware or tracking.': 'برنامه با مجوز VPN اندروید و موتور بومی مبتنی بر Xray، ترافیک شبکه را از نمایهٔ انتخابی شما عبور می‌دهد. مجوزهای معمول اندروید و برنامه‌های نصب‌شده همچنان برقرارند. VPN دستگاه را در برابر بدافزار یا رهگیری مصون نمی‌کند.',
+    'Personal subscriptions': 'اشتراک‌های شخصی',
+    'Subscription URLs and imported profile configurations are stored in Android encrypted secure storage when available. Subscription URLs are fetched from the provider over HTTPS. The app does not send personal profiles to the automatic server pool; imported profile data is handed to the native VPN engine when you connect.': 'نشانی اشتراک و پیکربندی پروفایل‌های واردشده، در صورت دسترس‌بودن، در فضای امن رمزگذاری‌شدهٔ اندروید ذخیره می‌شوند. نشانی اشتراک از طریق HTTPS از ارائه‌دهنده دریافت می‌شود. برنامه پروفایل‌های شخصی را به مخزن خودکار نمی‌فرستد؛ هنگام اتصال، اطلاعات پروفایل واردشده به موتور بومی VPN داده می‌شود.',
+    'Automatic server pool': 'مخزن خودکار سرورها',
+    'Automatic mode contacts the V2rayAG server-pool service over HTTPS to enroll the app instance, request a server lease, and release it when finished. The service receives the platform marker and an opaque access token required for this operation and returns a server profile. Use Personal mode if you do not want to use the automatic pool.': 'حالت خودکار از طریق HTTPS با سرویس مخزن سرور V2rayAG تماس می‌گیرد تا نمونهٔ برنامه را ثبت کند، سروری موقت درخواست کند و پس از پایان آن را آزاد سازد. سرویس نشانگر پلتفرم و توکن دسترسی غیرشفافی را که برای این کار لازم است دریافت می‌کند و پروفایل سرور را برمی‌گرداند. اگر نمی‌خواهید از مخزن خودکار استفاده کنید، حالت شخصی را انتخاب کنید.',
+    'CDN Fronting status': 'وضعیت عبور از CDN',
+    'CDN Fronting in this build applies optional IP/SNI overrides only to compatible TLS WebSocket profiles. It is not a Meek engine. Empty fields do not enable Meek and must not be interpreted as a successful CDN tunnel.': 'در این نسخه، عبور از CDN فقط بازنویسی اختیاری IP/SNI را روی پروفایل‌های سازگار TLS و WebSocket اعمال می‌کند؛ این قابلیت موتور Meek نیست. خالی‌بودن کادرها Meek را فعال نمی‌کند و نباید به‌معنای اتصال موفق از CDN تلقی شود.',
+    'Use and limitations': 'شرایط استفاده و محدودیت‌ها',
+    'Use only servers and subscriptions you are authorized to use, and follow local laws and provider terms. VPN providers and destination services may observe connection metadata or traffic. The app does not guarantee anonymity, uninterrupted access, or a specific ping or country result.': 'فقط از سرورها و اشتراک‌هایی استفاده کنید که مجاز به استفاده از آن‌ها هستید و قوانین محل خود و شرایط ارائه‌دهنده را رعایت کنید. ارائه‌دهندگان VPN و سرویس‌های مقصد ممکن است فرادادهٔ اتصال یا ترافیک را مشاهده کنند. برنامه ناشناس‌ماندن، دسترسی بی‌وقفه یا مقدار مشخص پینگ و کشور را تضمین نمی‌کند.',
     'PRIVATE ROUTE': 'مسیر خصوصی',
     'CONNECTED': 'متصل',
     'CONNECTING': 'در حال اتصال',
@@ -101,13 +150,93 @@ class V2rayLocalizations {
     'Local connection status and safe diagnostics': 'وضعیت محلی اتصال و گزارش‌های عیب‌یابی امن',
     'About': 'دربارهٔ برنامه',
     'CONNECTION MODE': 'حالت اتصال',
+    'Connection protocol': 'پروتکل اتصال',
+    'Auto': 'خودکار',
+    'CDN Fronting': 'عبور از CDN',
+    'Repair secure storage': 'تعمیر فضای ذخیره‌سازی امن',
+    'CDN FRONTING': 'عبور از CDN',
+    'PERSONAL': 'شخصی',
+    'SERVER PROFILE': 'پروفایل سرور',
+    'CONNECTION ATTEMPT': 'تلاش اتصال',
+    'Connecting with CDN Fronting': 'در حال اتصال با پروتکل عبور از CDN',
+    'Trying subscription profile…': 'در حال آزمودن پروفایل اشتراک…',
+    'CDN Fronting connection attempt is in progress.': 'تلاش برای اتصال از مسیر CDN در حال انجام است.',
+    'No CDN override configured': 'هیچ IP یا SNI اختصاصی ثبت نشده',
+    'CDN Fronting is selected. Empty fields do not switch to Auto; a compatible Meek engine is not available in this build.': 'عبور از CDN انتخاب شده است. خالی‌بودن کادرها حالت خودکار را فعال نمی‌کند؛ موتور سازگار با Meek در این نسخه موجود نیست.',
+    'CDN Fronting remains selected, but this build has no Meek engine for empty IP/SNI settings. Select Auto explicitly or configure a supported route.': 'حالت عبور از CDN همچنان انتخاب‌شده است، اما این نسخه برای IP/SNI خالی موتور Meek ندارد. برای تغییر حالت، خودکار را صریحاً انتخاب کنید یا مسیر پشتیبانی‌شده‌ای تنظیم کنید.',
+    'Empty CDN fields keep CDN selected, but this build has no independent Meek engine.': 'کادرهای خالی حالت CDN را حفظ می‌کنند، اما این نسخه موتور مستقل Meek ندارد.',
+    'Auto and CDN Fronting are separate saved choices. Switching to Auto disables CDN mode but keeps the saved IP/SNI fields for later.': 'خودکار و عبور از CDN دو انتخاب جداگانه‌اند و تنظیماتشان ذخیره می‌ماند. انتخاب خودکار حالت CDN را غیرفعال می‌کند، اما IP و SNI ذخیره‌شده برای استفادهٔ بعدی باقی می‌مانند.',
+    'Empty fields keep CDN selected and never switch to Auto. This build has no default Meek engine, so an empty-field CDN connection cannot start. Saved overrides are applied only to compatible TLS WebSocket profiles; this is not independent Meek.': 'کادرهای خالی حالت CDN را نگه می‌دارند و هرگز به خودکار تغییر نمی‌دهند. چون این نسخه موتور پیش‌فرض Meek ندارد، اتصال CDN با کادرهای خالی آغاز نمی‌شود. بازنویسی‌های ذخیره‌شده فقط روی پروفایل‌های سازگار TLS و WebSocket اعمال می‌شوند و Meek مستقل نیستند.',
+    'Attempt': 'تلاش',
+    'Not set — use automatic server address': 'تنظیم نشده — از نشانی سرور خودکار استفاده می\u200cشود',
+    'Not set — use server hostname': 'تنظیم نشده — از نام میزبان سرور استفاده می\u200cشود',
+    'Platform scope information': 'اطلاعات محدودهٔ پشتیبانی پلتفرم',
+    'SECURE • RELIABLE': 'امن • پایدار',
+    'Saved with Android Keystore-backed encrypted storage. Fetching requires HTTPS; server entries stay in memory and are not uploaded to V2rayAG.': 'با فضای ذخیره\u200cسازی رمزگذاری\u200cشده و متکی به Android Keystore ذخیره شده است. دریافت به HTTPS نیاز دارد؛ ورودی\u200cهای سرور در حافظهٔ برنامه می\u200cمانند و به V2rayAG بارگذاری نمی\u200cشوند.',
+    'Secure storage is unreadable': 'فضای ذخیره\u200cسازی امن خوانده نمی\u200cشود',
+    'Server information': 'اطلاعات سرورها',
+    'Stop connection attempts': 'توقف تلاش\u200cهای اتصال',
+    'TCP 443 response': 'پاسخ TCP ۴۴۳',
+    'TLS handshake': 'دست\u200cدهی TLS',
+    'TCP open': 'اتصال TCP برقرار است',
+    'TLS OK': 'TLS برقرار است',
+    'V2rayAG logo': 'لوگوی V2rayAG',
+    'The scan confirms direct TCP/TLS access only; it does not confirm this VPN route.': 'اسکن فقط دسترسی مستقیم TCP/TLS را تأیید می\u200cکند و وصل\u200cشدن از مسیر VPN را تضمین نمی\u200cکند.',
+    'The scan uses live DNS, a real TCP 443 connect-time measurement, and TLS. It does not prove that an IP/SNI pair can carry this VPN server.': 'اسکن از DNS زندهٔ گوشی، اندازه\u200cگیری واقعی زمان اتصال TCP به درگاه ۴۴۳ و TLS استفاده می\u200cکند؛ اما ثابت نمی\u200cکند که یک جفت IP/SNI می\u200cتواند ترافیک این سرور VPN را عبور دهد.',
+    'Trying CDN overrides on compatible TLS WebSocket servers…': 'در حال آزمودن بازنویسی CDN روی سرورهای TLS و WebSocket سازگار…',
+    'The native VPN tunnel is connected with the saved CDN overrides; live time and traffic are shown below.': 'تونل VPN بومی با بازنویسی\u200cهای ذخیره\u200cشدهٔ CDN متصل است؛ زمان و ترافیک زنده در پایین نمایش داده می\u200cشوند.',
+    'CDN IPs': 'IPهای CDN',
+    'CDN SNI hostname': 'نام میزبان SNI در CDN',
+    'Scan IPs': 'اسکن IPها',
+    'Scan SNI domains': 'اسکن دامنه‌های SNI',
+    'Scan CDN IPs': 'اسکن IPهای CDN',
+    'Scans use this phone\'s live DNS and HTTPS/TLS on the current network. They only confirm reachability, not VPN or Meek compatibility.': 'اسکن از DNS زندهٔ همین گوشی و HTTPS/TLS روی شبکهٔ فعلی استفاده می‌کند؛ فقط دسترسی‌پذیری را نشان می‌دهد، نه سازگاری با VPN یا Meek.',
+    'Checked': 'بررسی‌شده',
+    'Scanned': 'اسکن‌شده',
+    'Remaining': 'باقی‌مانده',
+    'Reachable': 'قابل‌دسترسی',
+    'Failed': 'ناموفق',
+    'Start scan': 'شروع اسکن',
+    'Scanning…': 'در حال اسکن…',
+    'Copy all': 'کپی همه',
+    'TLS reachable': 'TLS قابل‌دسترسی',
+    'Copy': 'کپی',
+    'Use': 'استفاده',
+    'Use all results': 'استفاده از همهٔ نتایج',
+    'Use fastest SNI': 'استفاده از سریع‌ترین SNI',
+    'Copied to clipboard.': 'در کلیپ‌بورد کپی شد.',
+    'Could not copy the result.': 'کپی نتیجه ممکن نشد.',
+    'Scan stopped.': 'اسکن متوقف شد.',
+    'Scan could not finish. Check the current network and try again.': 'اسکن کامل نشد؛ شبکهٔ فعلی را بررسی و دوباره تلاش کنید.',
+    'No TLS-reachable candidate was found on this network.': 'در این شبکه گزینه‌ای با TLS قابل‌دسترسی پیدا نشد.',
+    'Resolving current Akamai candidates…': 'در حال پیدا کردن نشانی‌های فعلی Akamai…',
+    'Start a scan to test Akamai candidates on this network.': 'برای آزمودن گزینه‌های Akamai در این شبکه، اسکن را شروع کنید.',
+    'One IP per line, or separate with commas': 'هر IP را در یک خط وارد کنید یا با ویرگول جدا کنید',
+    'example.com': 'example.com',
+    'Back to settings': 'بازگشت به تنظیمات',
+    'Save': 'ذخیره',
+    'Auto or optional CDN Fronting settings': 'حالت خودکار یا تنظیمات اختیاری عبور از CDN',
+    'Choose how automatic-pool connections should be routed. Auto is the default and leaves current connections unchanged.': 'روش مسیریابی اتصال‌های مخزن خودکار را انتخاب کنید. حالت خودکار پیش‌فرض است و روش فعلی اتصال را بدون تغییر نگه می‌دارد.',
+    'Use the existing automatic connection method with no CDN overrides.': 'از روش فعلی اتصال خودکار، بدون هیچ بازنویسی CDN، استفاده می‌شود.',
+    'Optional CDN IP and TLS SNI overrides for compatible automatic servers. Selecting it uses the automatic pool, not personal profiles.': 'بازنویسی اختیاری IP مربوط به CDN و SNI در TLS برای سرورهای خودکار سازگار. با انتخاب آن از مخزن خودکار استفاده می‌شود، نه پروفایل‌های شخصی.',
+    'Leave both fields empty to use the normal automatic connection. IP overrides are tried in order and require a compatible TLS WebSocket server.': 'برای استفاده از اتصال خودکار معمول، هر دو کادر را خالی بگذارید. IPها به‌ترتیب آزمایش می‌شوند و به سرور سازگار با TLS و WebSocket نیاز دارند.',
+    'Disconnect before changing connection protocol.': 'برای تغییر پروتکل اتصال، ابتدا اتصال را قطع کنید.',
+    'Stop the current connection attempt before changing protocol.': 'برای تغییر پروتکل، ابتدا تلاش اتصال فعلی را متوقف کنید.',
+    'Connection protocol settings saved.': 'تنظیمات پروتکل اتصال ذخیره شد.',
+    'Could not save connection protocol settings.': 'ذخیرهٔ تنظیمات پروتکل اتصال ممکن نشد.',
+    'CDN Fronting needs an automatic server using TLS WebSocket.': 'عبور از CDN به سرور خودکاری نیاز دارد که از TLS و WebSocket استفاده کند.',
+    'Enter no more than 20 CDN IP addresses.': 'حداکثر ۲۰ نشانی IP برای CDN وارد کنید.',
+    'Enter valid IPv4 or IPv6 addresses only.': 'فقط نشانی‌های معتبر IPv4 یا IPv6 وارد کنید.',
+    'Enter a hostname only, without a scheme, path, or port.': 'فقط نام میزبان را وارد کنید؛ بدون scheme، مسیر یا شمارهٔ درگاه.',
+    'Enter a valid CDN SNI hostname.': 'نام میزبان معتبر برای SNI مربوط به CDN وارد کنید.',
+    'SNI must be a hostname, not an IP address.': 'مقدار SNI باید نام میزبان باشد، نه نشانی IP.',
+    'This profile has no hostname to preserve. Enter a CDN SNI hostname before using an IP override.': 'این پروفایل نام میزبانی برای حفظ‌کردن ندارد. پیش از بازنویسی IP، نام میزبان SNI مربوط به CDN را وارد کنید.',
     'Automatic': 'خودکار',
     'Personal': 'شخصی / واردشده',
     'Use a server or subscription you imported.': 'از سرور یا اشتراکی که وارد کرده‌اید استفاده کنید.',
     'Connect automatically using the supplied server pool.': 'با استفاده از مخزن سرورهای ارائه‌شده، خودکار متصل شوید.',
     'Choose a personal server': 'انتخاب سرور شخصی',
     'Import or choose a server': 'واردکردن یا انتخاب سرور',
-    'Automatic server pool': 'مخزن خودکار سرورها',
     'Use the personal server selected in Servers.': 'از سرور شخصی انتخاب‌شده در بخش سرورها استفاده کنید.',
     'Connect to candidates directly; continue only after a safely cleaned-up failure.': 'اتصال واقعی به سرورها را امتحان کن و فقط پس از پاک‌سازی امنِ شکست، سراغ سرور بعدی برو.',
     'Disconnect before changing connection mode.': 'برای تغییر حالت اتصال، ابتدا اتصال را قطع کنید.',
@@ -301,6 +430,12 @@ class V2rayLocalizations {
     'Secure save is unavailable': 'ذخیرهٔ امن در دسترس نیست',
     'Android could not save this URL in secure storage. You can use it once in this session without saving it. It will be discarded when the app closes and will not be stored as plain text.': 'Android نتوانست این نشانی را در فضای امن ذخیره کند. می‌توانید فقط در همین نشست و بدون ذخیره از آن استفاده کنید. با بستن برنامه حذف می‌شود و به‌صورت متن ساده ذخیره نخواهد شد.',
     'Cancel': 'لغو',
+    'Remove profiles': 'حذف پروفایل‌ها',
+    'Remove profiles without a ping result?': 'پروفایل‌های بدون نتیجهٔ پینگ حذف شوند؟',
+    'No profiles with an inconclusive latency result were found.': 'پروفایلی با نتیجهٔ نامشخصِ سنجش تأخیر پیدا نشد.',
+    'Could not open the Telegram channel link.': 'بازکردن پیوند کانال تلگرام ممکن نشد.',
+    'Saved subscription and its profiles were removed from this device.': 'اشتراک ذخیره‌شده و پروفایل‌های مربوط به آن از این دستگاه حذف شدند.',
+    'Subscription storage could not be read; repair it before changing saved subscriptions.': 'فضای ذخیره‌سازی اشتراک‌ها خوانده نشد؛ پیش از تغییر اشتراک‌های ذخیره‌شده آن را تعمیر کنید.',
     'Use once': 'استفادهٔ یک‌باره',
     'Saved profile data cannot be decrypted': 'دادهٔ ذخیره‌شدهٔ سرورها رمزگشایی نمی‌شود',
     'New servers are temporary until secure storage is repaired': 'سرورهای تازه تا زمان تعمیر فضای امن موقتی هستند و با بستن برنامه از بین می‌روند؛',

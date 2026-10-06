@@ -99,12 +99,37 @@ jobs:
           package = match.group(1)
           source = f'''package {package}
 
+          import android.content.ComponentName
           import android.content.Intent
+          import android.graphics.Bitmap
+          import android.graphics.Canvas
+          import android.os.Build
+          import android.service.quicksettings.TileService
           import io.flutter.embedding.android.FlutterActivity
           import io.flutter.embedding.engine.FlutterEngine
           import io.flutter.plugin.common.MethodChannel
+          import java.io.ByteArrayOutputStream
 
           class MainActivity : FlutterActivity() {{
+              private val quickActionsPrefs by lazy {{ getSharedPreferences("v2rayag_quick_actions", MODE_PRIVATE) }}
+
+              override fun onCreate(savedInstanceState: android.os.Bundle?) {{
+                  super.onCreate(savedInstanceState)
+                  rememberPendingQuickAction(intent)
+              }}
+
+              override fun onNewIntent(intent: Intent) {{
+                  super.onNewIntent(intent)
+                  setIntent(intent)
+                  rememberPendingQuickAction(intent)
+              }}
+
+              private fun rememberPendingQuickAction(intent: Intent?) {{
+                  if (intent?.action == "com.v2rayag.ACTION_TOGGLE") {{
+                      quickActionsPrefs.edit().putString("pending_action", "toggle").apply()
+                  }}
+              }}
+
               override fun configureFlutterEngine(flutterEngine: FlutterEngine) {{
                   super.configureFlutterEngine(flutterEngine)
                   MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "v2rayag/app_picker")
@@ -118,19 +143,247 @@ jobs:
                               .mapNotNull {{ resolved ->
                                   val activity = resolved.activityInfo ?: return@mapNotNull null
                                   if (activity.packageName == packageName) return@mapNotNull null
-                                  mapOf(
+                                  val iconPng = runCatching {{
+                                      val bitmap = Bitmap.createBitmap(64, 64, Bitmap.Config.ARGB_8888)
+                                      val canvas = Canvas(bitmap)
+                                      val icon = resolved.loadIcon(packageManager)
+                                      icon.setBounds(0, 0, canvas.width, canvas.height)
+                                      icon.draw(canvas)
+                                      ByteArrayOutputStream().use {{ output ->
+                                          bitmap.compress(Bitmap.CompressFormat.PNG, 100, output)
+                                          output.toByteArray()
+                                      }}.also {{ bitmap.recycle() }}
+                                  }}.getOrNull()
+                                  mapOf<String, Any?>(
                                       "packageName" to activity.packageName,
-                                      "label" to resolved.loadLabel(packageManager).toString()
+                                      "label" to resolved.loadLabel(packageManager).toString(),
+                                      "iconPng" to iconPng
                                   )
                               }}
                               .distinctBy {{ it["packageName"] }}
-                              .sortedBy {{ it["label"]?.lowercase().orEmpty() }}
+                              .sortedBy {{ it["label"]?.toString()?.lowercase().orEmpty() }}
                           result.success(apps)
+                      }}
+
+                  MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "v2rayag/quick_actions")
+                      .setMethodCallHandler {{ call, result ->
+                          when (call.method) {{
+                              "consumePendingAction" -> {{
+                                  val action = quickActionsPrefs.getString("pending_action", null)
+                                  quickActionsPrefs.edit().remove("pending_action").apply()
+                                  result.success(action)
+                              }}
+                              "updateConnectionState" -> {{
+                                  val connected = call.argument<Boolean>("connected") ?: false
+                                  quickActionsPrefs.edit().putBoolean("connected", connected).apply()
+                                  if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {{
+                                      TileService.requestListeningState(
+                                          this,
+                                          ComponentName(this, V2rayAgQuickTileService::class.java)
+                                      )
+                                  }}
+                                  V2rayAgWidgetProvider.refresh(this)
+                                  result.success(null)
+                              }}
+                              else -> result.notImplemented()
+                          }}
                       }}
               }}
           }}
           '''
           path.write_text(source)
+          PY
+
+      - name: Add functional Quick Settings tile and home-screen widget
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          kotlin_dir = Path('android/app/src/main/kotlin')
+          activities = list(kotlin_dir.rglob('MainActivity.kt'))
+          if len(activities) != 1:
+              raise SystemExit('Could not find generated MainActivity for native quick controls')
+          match = re.search(r'^package\s+([A-Za-z0-9_.]+)', activities[0].read_text(), re.M)
+          if not match:
+              raise SystemExit('Could not determine Android package for native quick controls')
+          package = match.group(1)
+          package_dir = kotlin_dir.joinpath(*package.split('.'))
+          package_dir.mkdir(parents=True, exist_ok=True)
+          (package_dir / 'V2rayAgQuickTileService.kt').write_text(f'''package {package}
+
+          import android.app.PendingIntent
+          import android.content.Intent
+          import android.os.Build
+          import android.service.quicksettings.Tile
+          import android.service.quicksettings.TileService
+
+          class V2rayAgQuickTileService : TileService() {{
+              override fun onClick() {{
+                  super.onClick()
+                  getSharedPreferences("v2rayag_quick_actions", MODE_PRIVATE)
+                      .edit().putString("pending_action", "toggle").apply()
+                  val launch = packageManager.getLaunchIntentForPackage(packageName) ?: return
+                  val flags = PendingIntent.FLAG_UPDATE_CURRENT or
+                      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) PendingIntent.FLAG_IMMUTABLE else 0
+                  val pending = PendingIntent.getActivity(this, 7101, launch, flags)
+                  if (Build.VERSION.SDK_INT >= 34) {{
+                      startActivityAndCollapse(pending)
+                  }} else {{
+                      @Suppress("DEPRECATION")
+                      startActivityAndCollapse(launch)
+                  }}
+              }}
+
+              override fun onStartListening() {{
+                  super.onStartListening()
+                  val connected = getSharedPreferences("v2rayag_quick_actions", MODE_PRIVATE)
+                      .getBoolean("connected", false)
+                  qsTile.label = getString(R.string.v2rayag_quick_tile)
+                  qsTile.state = if (connected) Tile.STATE_ACTIVE else Tile.STATE_INACTIVE
+                  qsTile.updateTile()
+              }}
+          }}
+          ''')
+          (package_dir / 'V2rayAgWidgetProvider.kt').write_text(f'''package {package}
+
+          import android.app.PendingIntent
+          import android.appwidget.AppWidgetManager
+          import android.appwidget.AppWidgetProvider
+          import android.content.ComponentName
+          import android.content.Context
+          import android.content.Intent
+          import android.widget.RemoteViews
+
+          class V2rayAgWidgetProvider : AppWidgetProvider() {{
+              override fun onUpdate(context: Context, manager: AppWidgetManager, ids: IntArray) {{
+                  for (id in ids) update(context, manager, id)
+              }}
+
+              companion object {{
+                  fun refresh(context: Context) {{
+                      val manager = AppWidgetManager.getInstance(context)
+                      val component = ComponentName(context, V2rayAgWidgetProvider::class.java)
+                      for (id in manager.getAppWidgetIds(component)) update(context, manager, id)
+                  }}
+
+                  private fun update(context: Context, manager: AppWidgetManager, id: Int) {{
+                      val connected = context.getSharedPreferences("v2rayag_quick_actions", Context.MODE_PRIVATE)
+                          .getBoolean("connected", false)
+                      val views = RemoteViews(context.packageName, R.layout.v2rayag_widget)
+                      views.setTextViewText(
+                          R.id.widget_state,
+                          if (connected) context.getString(R.string.v2rayag_widget_connected)
+                          else context.getString(R.string.v2rayag_widget_disconnected)
+                      )
+                      val intent = Intent(context, MainActivity::class.java).apply {{
+                          action = "com.v2rayag.ACTION_TOGGLE"
+                          addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+                      }}
+                      val flags = PendingIntent.FLAG_UPDATE_CURRENT or
+                          if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.M) PendingIntent.FLAG_IMMUTABLE else 0
+                      views.setOnClickPendingIntent(
+                          R.id.widget_root,
+                          PendingIntent.getActivity(context, id, intent, flags)
+                      )
+                      manager.updateAppWidget(id, views)
+                  }}
+              }}
+          }}
+          ''')
+
+          res = Path('android/app/src/main/res')
+          (res / 'layout').mkdir(parents=True, exist_ok=True)
+          (res / 'xml').mkdir(parents=True, exist_ok=True)
+          (res / 'drawable').mkdir(parents=True, exist_ok=True)
+          (res / 'values').mkdir(parents=True, exist_ok=True)
+          (res / 'values-fa').mkdir(parents=True, exist_ok=True)
+          (res / 'values' / 'v2rayag_quick_controls.xml').write_text('''<?xml version="1.0" encoding="utf-8"?>
+          <resources>
+              <string name="v2rayag_quick_tile">V2rayAG</string>
+              <string name="v2rayag_widget_connected">VPN connected · tap to disconnect</string>
+              <string name="v2rayag_widget_disconnected">Tap to open and connect</string>
+          </resources>
+          ''')
+          (res / 'values-fa' / 'v2rayag_quick_controls.xml').write_text('''<?xml version="1.0" encoding="utf-8"?>
+          <resources>
+              <string name="v2rayag_quick_tile">V2rayAG</string>
+              <string name="v2rayag_widget_connected">وی‌پی‌ان وصل است · برای قطع لمس کنید</string>
+              <string name="v2rayag_widget_disconnected">برای بازکردن و اتصال لمس کنید</string>
+          </resources>
+          ''')
+          (res / 'layout' / 'v2rayag_widget.xml').write_text('''<?xml version="1.0" encoding="utf-8"?>
+          <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+              android:id="@+id/widget_root"
+              android:layout_width="match_parent"
+              android:layout_height="match_parent"
+              android:background="@drawable/v2rayag_widget_background"
+              android:gravity="center_vertical"
+              android:orientation="vertical"
+              android:padding="16dp">
+              <TextView
+                  android:layout_width="wrap_content"
+                  android:layout_height="wrap_content"
+                  android:text="V2rayAG"
+                  android:textColor="#FFFFFFFF"
+                  android:textSize="16sp"
+                  android:textStyle="bold" />
+              <TextView
+                  android:id="@+id/widget_state"
+                  android:layout_width="wrap_content"
+                  android:layout_height="wrap_content"
+                  android:layout_marginTop="6dp"
+                  android:text="Tap to open and connect"
+                  android:textColor="#FFD0DAD5"
+                  android:textSize="12sp" />
+          </LinearLayout>
+          ''')
+          (res / 'drawable' / 'v2rayag_widget_background.xml').write_text('''<?xml version="1.0" encoding="utf-8"?>
+          <shape xmlns:android="http://schemas.android.com/apk/res/android" android:shape="rectangle">
+              <solid android:color="#FF192321" />
+              <corners android:radius="18dp" />
+          </shape>
+          ''')
+          (res / 'xml' / 'v2rayag_widget_info.xml').write_text('''<?xml version="1.0" encoding="utf-8"?>
+          <appwidget-provider xmlns:android="http://schemas.android.com/apk/res/android"
+              android:minWidth="170dp"
+              android:minHeight="90dp"
+              android:initialLayout="@layout/v2rayag_widget"
+              android:resizeMode="horizontal|vertical"
+              android:updatePeriodMillis="0"
+              android:widgetCategory="home_screen" />
+          ''')
+
+          manifest = Path('android/app/src/main/AndroidManifest.xml')
+          xml = manifest.read_text()
+          additions = '''
+              <service
+                  android:name=".V2rayAgQuickTileService"
+                  android:label="V2rayAG"
+                  android:icon="@mipmap/ic_launcher"
+                  android:permission="android.permission.BIND_QUICK_SETTINGS_TILE"
+                  android:exported="true">
+                  <intent-filter>
+                      <action android:name="android.service.quicksettings.action.QS_TILE" />
+                  </intent-filter>
+                  <meta-data android:name="android.service.quicksettings.ACTIVE_TILE" android:value="false" />
+              </service>
+              <receiver
+                  android:name=".V2rayAgWidgetProvider"
+                  android:label="V2rayAG VPN"
+                  android:exported="true">
+                  <intent-filter>
+                      <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+                  </intent-filter>
+                  <meta-data android:name="android.appwidget.provider" android:resource="@xml/v2rayag_widget_info" />
+              </receiver>
+          '''
+          if 'V2rayAgQuickTileService' not in xml:
+              xml, count = re.subn(r'(</application>)', additions + r'\1', xml, count=1)
+              if count != 1:
+                  raise SystemExit('Could not register the Quick Settings tile and home-screen widget')
+              manifest.write_text(xml)
+          print('Quick Settings tile and widget sources registered; both launch a confirmed Flutter toggle action.')
           PY
 
       - name: Set Android launcher and installer name
@@ -467,6 +720,57 @@ jobs:
               raise SystemExit('The custom transparent notification glyph must take priority over the launcher icon')
           service.write_text(text)
           print('The transparent V2rayAG glyph is preferred for the VPN notification.')
+          PY
+
+      - name: Enable bounded native Xray workers for subscription latency tests
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import os
+
+          pub_cache = Path(os.environ.get('PUB_CACHE', Path.home() / '.pub-cache'))
+          package = next((root for root in [
+              pub_cache / 'hosted/pub.dev/flutter_vless_android-1.1.6',
+              pub_cache / 'hosted/pub.dartlang.org/flutter_vless_android-1.1.6',
+          ] if root.exists()), None)
+          if package is None:
+              raise SystemExit('Pinned flutter_vless_android 1.1.6 package was not found')
+
+          plugin = package / 'android/src/main/kotlin/com/github/tfox/flutter_vless/FlutterVlessPlugin.kt'
+          text = plugin.read_text()
+          old_pool = 'private val executor = Executors.newSingleThreadExecutor()'
+          new_pool = old_pool + '\n    private val pingExecutor = Executors.newFixedThreadPool(4)'
+          if 'private val pingExecutor = Executors.newFixedThreadPool(4)' not in text:
+              if old_pool not in text:
+                  raise SystemExit('Could not locate the pinned FlutterVless executor')
+              text = text.replace(old_pool, new_pool, 1)
+          start = text.find('"getServerDelay" -> {')
+          end = text.find('"getConnectedServerDelay" -> {', start)
+          if start < 0 or end < 0:
+              raise SystemExit('Could not locate the native temporary Xray latency worker')
+          section = text[start:end]
+          if 'pingExecutor.execute {' not in section:
+              if section.count('executor.execute {') != 1:
+                  raise SystemExit('Unexpected native latency worker implementation')
+              section = section.replace('executor.execute {', 'pingExecutor.execute {', 1)
+              text = text[:start] + section + text[end:]
+          shutdown = '        executor.shutdown()'
+          if '        pingExecutor.shutdown()' not in text:
+              if shutdown not in text:
+                  raise SystemExit('Could not locate native executor cleanup')
+              text = text.replace(shutdown, shutdown + '\n        pingExecutor.shutdown()', 1)
+          plugin.write_text(text)
+
+          utilities = package / 'android/src/main/kotlin/com/github/tfox/flutter_vless/xray/utils/Utilities.kt'
+          utility_text = utilities.read_text()
+          plain = '    fun copyAssets(context: Context) {'
+          synchronized = '    @Synchronized\n    fun copyAssets(context: Context) {'
+          if synchronized not in utility_text:
+              if plain not in utility_text:
+                  raise SystemExit('Could not locate native Xray asset initialization')
+              utility_text = utility_text.replace(plain, synchronized, 1)
+              utilities.write_text(utility_text)
+          print('Native profile-latency probes use at most four independent Xray workers; shared asset initialization is synchronized.')
           PY
 
       - name: Analyze Dart code
