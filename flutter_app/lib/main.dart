@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -29,7 +30,7 @@ const _mint = Color(0xFF51D6AF);
 const _coral = Color(0xFFFF886E);
 const _canvas = Color(0xFFF6F7F3);
 
-enum _SubscriptionSaveChoice { saved, useOnce, cancelled }
+enum _SubscriptionSaveChoice { saved, cancelled }
 
 /// Keep the connection control available to stop an orphaned native VPN
 /// session even when secure storage could not restore its selected profile.
@@ -241,7 +242,6 @@ class _VpnShellState extends State<VpnShell> {
   bool _subscriptionRestoreFailed = false;
   bool _legacySecureDataUnavailable = false;
   bool _secureNamespaceRotated = false;
-  final Set<String> _sessionOnlySubscriptionIds = {};
   List<SavedSubscription> _savedSubscriptions = [];
   bool _subscriptionBusy = false;
   int? _selectedIndex;
@@ -275,6 +275,9 @@ class _VpnShellState extends State<VpnShell> {
   final Set<String> _excludedPackages = {};
   static const MethodChannel _appPickerChannel =
       MethodChannel('v2rayag/app_picker');
+  static const MethodChannel _quickActionsChannel =
+      MethodChannel('v2rayag/quick_actions');
+  bool? _lastPublishedQuickActionState;
   static const _excludedPackagesKey = 'excluded_packages_v1';
   static const _manualProfileModeKey = 'manual_profile_mode_v1';
 
@@ -286,12 +289,52 @@ class _VpnShellState extends State<VpnShell> {
   void initState() {
     super.initState();
     _engine.addListener(_onEngineChanged);
-    _engine.initialize();
-    _restoreSubscriptions();
-    _restoreProfiles();
-    _restoreExcludedPackages();
-    _restorePoolSummary();
-    _restoreConnectionMode();
+    unawaited(_initializeAndRestore());
+  }
+
+  Future<void> _initializeAndRestore() async {
+    // Initialize the native owner first so an existing Android VPN session is
+    // known before any saved UI metadata is reconciled. Read encrypted stores
+    // sequentially: this avoids concurrent namespace migration on cold start.
+    await _engine.initialize();
+    await _restoreSubscriptions();
+    await _restoreProfiles();
+    await Future.wait([
+      _restoreExcludedPackages(),
+      _restorePoolSummary(),
+      _restoreConnectionMode(),
+    ]);
+    await _publishQuickActionState();
+    await _consumePendingQuickAction();
+  }
+
+  Future<void> _publishQuickActionState() async {
+    final connected = _engine.connected;
+    if (_lastPublishedQuickActionState == connected) return;
+    _lastPublishedQuickActionState = connected;
+    try {
+      await _quickActionsChannel.invokeMethod<void>(
+        'updateConnectionState',
+        {'connected': connected},
+      );
+    } on MissingPluginException {
+      // Non-Android/test builds have no native tile or widget.
+    } on PlatformException {
+      // Keep the VPN session independent from optional home-screen controls.
+    }
+  }
+
+  Future<void> _consumePendingQuickAction() async {
+    try {
+      final action = await _quickActionsChannel.invokeMethod<String>(
+        'consumePendingAction',
+      );
+      if (action == 'toggle' && mounted) await _toggleConnection();
+    } on MissingPluginException {
+      // Non-Android/test builds simply have no system-tile bridge.
+    } on PlatformException {
+      // A failed external launch action must not change the active VPN.
+    }
   }
 
   String _safeStorageFailure(Object error) {
@@ -425,9 +468,13 @@ class _VpnShellState extends State<VpnShell> {
         final decoded = jsonDecode(raw);
         if (decoded is Map<String, dynamic>) {
           final summary = PoolConnectionSummary.fromJson(decoded);
-          if (mounted && (!_engine.initialized || _engine.connected || _engine.connecting)) {
+          final statusName = _engine.status.connectionState.name;
+          final nativeStateMayBeRestoring = !_engine.initialized ||
+              _engine.connected || _engine.connecting || _engine.disconnecting ||
+              statusName == 'unknown';
+          if (mounted && nativeStateMayBeRestoring) {
             setState(() => _activePoolSummary = summary);
-          } else if (_engine.initialized) {
+          } else if (_engine.initialized && statusName == 'disconnected') {
             await preferences.remove(_activePoolSummaryKey);
           }
         }
@@ -543,13 +590,33 @@ class _VpnShellState extends State<VpnShell> {
     }));
   }
 
-  Future<void> _saveConnectionMode(bool manual) async {
+  Future<bool> _ensureConnectionModeSaved(bool manual) async {
     try {
       final preferences = await SharedPreferences.getInstance();
-      await preferences.setBool(_manualProfileModeKey, manual);
+      final saved = await preferences.setBool(_manualProfileModeKey, manual);
+      return saved && preferences.getBool(_manualProfileModeKey) == manual;
     } on Object {
-      // Keep the current session usable even if this preference cannot be saved.
+      return false;
     }
+  }
+
+  Future<bool> _ensurePersonalConnectionSettingsSaved() async {
+    if (!await _ensureConnectionModeSaved(true)) return false;
+    final personalProtocol =
+        _cdnFrontingSettings.withProtocol(ConnectionProtocol.auto);
+    try {
+      await _cdnPreferencesRepository.save(personalProtocol);
+      if (mounted && _cdnFrontingSettings.protocol != ConnectionProtocol.auto) {
+        setState(() => _cdnFrontingSettings = personalProtocol);
+      }
+      return true;
+    } on Object {
+      return false;
+    }
+  }
+
+  Future<void> _saveConnectionMode(bool manual) async {
+    await _ensureConnectionModeSaved(manual);
   }
 
   Future<void> _restoreExcludedPackages() async {
@@ -598,7 +665,17 @@ class _VpnShellState extends State<VpnShell> {
       final packageName = (item['packageName'] ?? '').toString().trim();
       final label = (item['label'] ?? packageName).toString().trim();
       if (packageName.isEmpty) continue;
-      apps.add(_InstalledApp(packageName, label.isEmpty ? packageName : label));
+      final rawIcon = item['iconPng'];
+      final iconBytes = rawIcon is Uint8List
+          ? rawIcon
+          : rawIcon is List<int>
+              ? Uint8List.fromList(rawIcon)
+              : null;
+      apps.add(_InstalledApp(
+        packageName,
+        label.isEmpty ? packageName : label,
+        iconBytes,
+      ));
     }
     apps.sort((a, b) => a.label.toLowerCase().compareTo(b.label.toLowerCase()));
     if (apps.isEmpty) {
@@ -632,7 +709,34 @@ class _VpnShellState extends State<VpnShell> {
                       return CheckboxListTile(
                         dense: true,
                         value: selected.contains(app.packageName),
-                        title: Text(app.label, maxLines: 1, overflow: TextOverflow.ellipsis),
+                        title: Row(
+                          children: [
+                            CircleAvatar(
+                              radius: 15,
+                              backgroundColor: Theme.of(context).colorScheme.surfaceContainerHighest,
+                              child: app.iconBytes == null
+                                  ? const Icon(Icons.android_rounded, size: 18)
+                                  : ClipOval(
+                                      child: Image.memory(
+                                        app.iconBytes!,
+                                        width: 30,
+                                        height: 30,
+                                        fit: BoxFit.cover,
+                                        errorBuilder: (context, error, stack) =>
+                                            const Icon(Icons.android_rounded, size: 18),
+                                      ),
+                                    ),
+                            ),
+                            const SizedBox(width: 10),
+                            Expanded(
+                              child: Text(
+                                app.label,
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                            ),
+                          ],
+                        ),
                         subtitle: Text(app.packageName, maxLines: 1, overflow: TextOverflow.ellipsis),
                         onChanged: (checked) => refresh(() {
                           if (checked == true) {
@@ -679,8 +783,10 @@ class _VpnShellState extends State<VpnShell> {
   }
 
   void _onEngineChanged() {
-    if (_poolSummaryRestored && _engine.initialized && !_engine.connected &&
-        !_engine.connecting && !_engine.disconnecting && !_poolSearching) {
+    unawaited(_publishQuickActionState());
+    if (_poolSummaryRestored && _engine.initialized &&
+        _engine.status.connectionState.name == 'disconnected' &&
+        !_poolSearching) {
       _activePoolSummary = null;
       _activePoolProfile = null;
       _activePoolPingChecked = false;
@@ -736,10 +842,21 @@ class _VpnShellState extends State<VpnShell> {
       return;
     }
 
-    // Do not let a fast first tap connect using the temporary Auto default
-    // before the user's saved protocol has been restored from preferences.
-    await _connectionPreferencesReady.future;
+    // Do not start until encrypted subscription/profile data and routing
+    // preferences have been restored. This prevents a cold-start tap or system
+    // tile from racing the saved Personal selection.
+    await Future.wait([
+      _subscriptionsReady.future,
+      _profilesReady.future,
+      _routingPreferencesReady.future,
+      _connectionPreferencesReady.future,
+    ]);
     if (!mounted) return;
+
+    if (_subscriptionRestoreFailed || _profileRestoreFailed) {
+      _showMessage('Saved secure data could not be read. Existing records were not deleted; repair secure storage before connecting.');
+      return;
+    }
 
     if (!_useManualProfile &&
         _cdnFrontingSettings.protocol == ConnectionProtocol.cdnFronting &&
@@ -755,6 +872,10 @@ class _VpnShellState extends State<VpnShell> {
         ? _profiles[_selectedIndex!]
         : null;
     if (profile != null) {
+      if (!await _ensurePersonalConnectionSettingsSaved()) {
+        _showMessage('Could not securely save the selected Personal route mode. The VPN was not started.');
+        return;
+      }
       final selectedIndex = _selectedIndex!;
       final sourceId = selectedIndex < _profileSources.length
           ? _profileSources[selectedIndex]
@@ -780,6 +901,9 @@ class _VpnShellState extends State<VpnShell> {
           _activePoolTelegramVerified = null;
         });
         unawaited(_persistPoolSummary(null));
+        // Persist the selected Personal route before starting the native
+        // service, so an Android process recreation cannot outlive its label.
+        if (!await _persistProfiles()) return;
         await _engine.connect(
           profile,
           blockedApps: _excludedPackages.toList(growable: false),
@@ -838,6 +962,10 @@ class _VpnShellState extends State<VpnShell> {
           _selectedIndex = index;
           _personalAttemptIndex = attempt + 1;
         });
+        // Save the exact candidate before native Android can keep the VPN
+        // alive beyond this Dart process. On restart the route label and its
+        // subscription source then match the active native session.
+        if (!await _persistProfiles()) break;
         connected = await _engine.connect(
           _profiles[index],
           blockedApps: _excludedPackages.toList(growable: false),
@@ -884,6 +1012,16 @@ class _VpnShellState extends State<VpnShell> {
   Future<void> _connectAutomatically() async {
     if (!_engine.canStart) {
       _showMessage('The VPN engine is not ready yet. Try again in a moment.');
+      return;
+    }
+    if (!await _ensureConnectionModeSaved(false)) {
+      _showMessage('Could not save the Automatic connection mode. The VPN was not started.');
+      return;
+    }
+    try {
+      await _cdnPreferencesRepository.save(_cdnFrontingSettings);
+    } on Object {
+      _showMessage('Could not save connection protocol settings. The VPN was not started.');
       return;
     }
 
@@ -1489,45 +1627,17 @@ class _VpnShellState extends State<VpnShell> {
     );
   }
 
-  void _rememberSessionOnlySubscription(SavedSubscription subscription) {
-    setState(() {
-      final index = _savedSubscriptions.indexWhere((item) => item.id == subscription.id);
-      if (index < 0) {
-        _savedSubscriptions.add(subscription);
-      } else {
-        _savedSubscriptions[index] = subscription;
-      }
-      _sessionOnlySubscriptionIds.add(subscription.id);
-    });
-  }
-
   Future<_SubscriptionSaveChoice> _saveSubscription(
     SavedSubscription subscription,
   ) async {
+    await _subscriptionsReady.future;
     if (_subscriptionRestoreFailed) {
-      if (!mounted) return _SubscriptionSaveChoice.cancelled;
-      final useOnce = await showDialog<bool>(
-        context: context,
-        builder: (dialogContext) => AlertDialog(
-          title: const LocalizedText('Secure storage is unreadable'),
-          content: const LocalizedText(
-            'The app will not replace data it cannot read. You can cancel, or use this subscription for this session only; it will not be saved and will disappear when the app closes.',
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.of(dialogContext).pop(false),
-              child: const LocalizedText('Cancel'),
-            ),
-            FilledButton(
-              onPressed: () => Navigator.of(dialogContext).pop(true),
-              child: const LocalizedText('Use once'),
-            ),
-          ],
-        ),
-      );
-      if (useOnce != true || !mounted) return _SubscriptionSaveChoice.cancelled;
-      _rememberSessionOnlySubscription(subscription);
-      return _SubscriptionSaveChoice.useOnce;
+      if (mounted) {
+        _showMessage(
+          'Saved subscription data could not be read securely. Nothing was replaced; repair secure storage before adding or editing subscriptions.',
+        );
+      }
+      return _SubscriptionSaveChoice.cancelled;
     }
     final next = [..._savedSubscriptions];
     final index = next.indexWhere((item) => item.id == subscription.id);
@@ -1540,32 +1650,13 @@ class _VpnShellState extends State<VpnShell> {
       await _subscriptionRepository.saveAll(next);
       if (mounted) setState(() => _savedSubscriptions = next);
       return _SubscriptionSaveChoice.saved;
-    } on Object {
-      if (!mounted) return _SubscriptionSaveChoice.cancelled;
-      final useOnce = await showDialog<bool>(
-        context: context,
-        builder: (dialogContext) => AlertDialog(
-          title: const LocalizedText('Secure save is unavailable'),
-          content: const LocalizedText(
-            'Android could not save this URL in secure storage. You can use it once in this session without saving it. It will be discarded when the app closes and will not be stored as plain text.',
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.of(dialogContext).pop(false),
-              child: const LocalizedText('Cancel'),
-            ),
-            FilledButton(
-              onPressed: () => Navigator.of(dialogContext).pop(true),
-              child: const LocalizedText('Use once'),
-            ),
-          ],
-        ),
-      );
-      if (useOnce != true || !mounted) {
-        return _SubscriptionSaveChoice.cancelled;
+    } on Object catch (error) {
+      if (mounted) {
+        _showMessage(
+          'Subscription was not added because secure storage could not verify the save (${_safeStorageFailure(error)}). Try again after fixing device storage.',
+        );
       }
-      _rememberSessionOnlySubscription(subscription);
-      return _SubscriptionSaveChoice.useOnce;
+      return _SubscriptionSaveChoice.cancelled;
     }
   }
 
@@ -1604,8 +1695,7 @@ class _VpnShellState extends State<VpnShell> {
     await _subscriptionsReady.future;
     await _profilesReady.future;
     if (!mounted) return;
-    final sessionOnly = _sessionOnlySubscriptionIds.contains(subscription.id);
-    if (_subscriptionRestoreFailed && !sessionOnly) {
+    if (_subscriptionRestoreFailed) {
       _showMessage('Subscription storage could not be read; repair it before changing saved subscriptions.');
       return;
     }
@@ -1614,13 +1704,10 @@ class _VpnShellState extends State<VpnShell> {
         ? _profiles[_selectedIndex!].config
         : null;
     try {
-      if (!_subscriptionRestoreFailed) {
-        await _subscriptionRepository.saveAll(next);
-      }
+      await _subscriptionRepository.saveAll(next);
       if (!mounted) return;
       setState(() {
         _savedSubscriptions = next;
-        _sessionOnlySubscriptionIds.remove(subscription.id);
         final retained = <VpnProfile>[];
         final retainedSources = <String?>[];
         for (var i = 0; i < _profiles.length; i++) {
@@ -2986,9 +3073,10 @@ class _EmptyCard extends StatelessWidget {
 }
 
 class _InstalledApp {
-  const _InstalledApp(this.packageName, this.label);
+  const _InstalledApp(this.packageName, this.label, this.iconBytes);
   final String packageName;
   final String label;
+  final Uint8List? iconBytes;
 }
 
 class _SettingsPage extends StatelessWidget {
