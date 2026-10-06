@@ -8,7 +8,7 @@ import 'vpn_profile.dart';
 enum ConnectionProtocol { auto, cdnFronting }
 
 /// User-selected transport behavior. These settings contain no credentials.
-/// An empty CDN configuration deliberately leaves the existing profile byte-for-byte unchanged.
+/// CDN remains a distinct mode; blank overrides must never fall back to Auto.
 class CdnFrontingSettings {
   const CdnFrontingSettings({
     this.protocol = ConnectionProtocol.auto,
@@ -84,16 +84,22 @@ class CdnProfileNotSupportedException implements Exception {
   String toString() => 'This server does not use a supported TLS WebSocket route.';
 }
 
-/// Creates per-IP variants for an automatic-pool profile. Auto mode, or CDN
-/// mode with both fields blank, returns the original profile without parsing
-/// or re-encoding its Xray configuration.
+class CdnMeekEngineUnavailableException implements Exception {
+  const CdnMeekEngineUnavailableException();
+
+  @override
+  String toString() => 'No independent Meek engine is available for empty CDN overrides.';
+}
+
+/// Creates per-IP variants for an automatic-pool profile. Auto mode returns
+/// the original profile. CDN mode with blank overrides fails closed because
+/// this build has no independent Meek engine or default Meek server source.
 List<VpnProfile> buildCdnProfileAttempts(
   VpnProfile profile,
   CdnFrontingSettings settings,
 ) {
-  if (settings.protocol != ConnectionProtocol.cdnFronting || !settings.hasOverrides) {
-    return [profile];
-  }
+  if (settings.protocol != ConnectionProtocol.cdnFronting) return [profile];
+  if (!settings.hasOverrides) throw const CdnMeekEngineUnavailableException();
 
   final ips = settings.parsedIps;
   final targets = ips.isEmpty

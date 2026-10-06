@@ -17,6 +17,7 @@ dependencies:
   flutter_secure_storage: 11.2.0
   shared_preferences: ^2.5.3
   mobile_scanner: ^7.4.2
+  url_launcher: ^6.3.2
 
 dependency_overrides:
   flutter_vless_android: 1.1.6

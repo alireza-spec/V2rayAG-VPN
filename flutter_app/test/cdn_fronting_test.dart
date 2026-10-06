@@ -52,18 +52,21 @@ void main() {
   });
 
   group('Xray CDN overrides', () {
-    test('Auto and blank CDN settings return the original profile unchanged', () {
+    test('Auto returns the original profile unchanged', () {
       final original = profile();
       expect(buildCdnProfileAttempts(original, const CdnFrontingSettings()).single,
           same(original));
-      expect(
-        buildCdnProfileAttempts(
-          original,
-          const CdnFrontingSettings(protocol: ConnectionProtocol.cdnFronting),
-        ).single,
-        same(original),
-      );
       expect(applyCdnFrontingOverrides(config), config);
+    });
+
+    test('blank CDN settings never fall back to the automatic profile', () {
+      expect(
+        () => buildCdnProfileAttempts(
+          profile(),
+          const CdnFrontingSettings(protocol: ConnectionProtocol.cdnFronting),
+        ),
+        throwsA(isA<CdnMeekEngineUnavailableException>()),
+      );
     });
 
     test('IP-only override keeps the original TLS identity and WebSocket Host', () {

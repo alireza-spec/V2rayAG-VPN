@@ -469,6 +469,57 @@ jobs:
           print('The transparent V2rayAG glyph is preferred for the VPN notification.')
           PY
 
+      - name: Enable bounded native Xray workers for subscription latency tests
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import os
+
+          pub_cache = Path(os.environ.get('PUB_CACHE', Path.home() / '.pub-cache'))
+          package = next((root for root in [
+              pub_cache / 'hosted/pub.dev/flutter_vless_android-1.1.6',
+              pub_cache / 'hosted/pub.dartlang.org/flutter_vless_android-1.1.6',
+          ] if root.exists()), None)
+          if package is None:
+              raise SystemExit('Pinned flutter_vless_android 1.1.6 package was not found')
+
+          plugin = package / 'android/src/main/kotlin/com/github/tfox/flutter_vless/FlutterVlessPlugin.kt'
+          text = plugin.read_text()
+          old_pool = 'private val executor = Executors.newSingleThreadExecutor()'
+          new_pool = old_pool + '\n    private val pingExecutor = Executors.newFixedThreadPool(4)'
+          if 'private val pingExecutor = Executors.newFixedThreadPool(4)' not in text:
+              if old_pool not in text:
+                  raise SystemExit('Could not locate the pinned FlutterVless executor')
+              text = text.replace(old_pool, new_pool, 1)
+          start = text.find('"getServerDelay" -> {')
+          end = text.find('"getConnectedServerDelay" -> {', start)
+          if start < 0 or end < 0:
+              raise SystemExit('Could not locate the native temporary Xray latency worker')
+          section = text[start:end]
+          if 'pingExecutor.execute {' not in section:
+              if section.count('executor.execute {') != 1:
+                  raise SystemExit('Unexpected native latency worker implementation')
+              section = section.replace('executor.execute {', 'pingExecutor.execute {', 1)
+              text = text[:start] + section + text[end:]
+          shutdown = '        executor.shutdown()'
+          if '        pingExecutor.shutdown()' not in text:
+              if shutdown not in text:
+                  raise SystemExit('Could not locate native executor cleanup')
+              text = text.replace(shutdown, shutdown + '\n        pingExecutor.shutdown()', 1)
+          plugin.write_text(text)
+
+          utilities = package / 'android/src/main/kotlin/com/github/tfox/flutter_vless/xray/utils/Utilities.kt'
+          utility_text = utilities.read_text()
+          plain = '    fun copyAssets(context: Context) {'
+          synchronized = '    @Synchronized\n    fun copyAssets(context: Context) {'
+          if synchronized not in utility_text:
+              if plain not in utility_text:
+                  raise SystemExit('Could not locate native Xray asset initialization')
+              utility_text = utility_text.replace(plain, synchronized, 1)
+              utilities.write_text(utility_text)
+          print('Native profile-latency probes use at most four independent Xray workers; shared asset initialization is synchronized.')
+          PY
+
       - name: Analyze Dart code
         run: flutter analyze --no-pub
 

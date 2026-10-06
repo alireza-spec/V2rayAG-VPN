@@ -76,8 +76,8 @@ class CdnScanCancelled implements Exception {
 /// any particular VPN profile or tunnel protocol will work.
 class CdnEndpointScanner {
   CdnEndpointScanner({
-    this.timeout = const Duration(seconds: 3),
-    this.maxConcurrency = 3,
+    this.timeout = const Duration(seconds: 2),
+    this.maxConcurrency = 8,
     Future<List<InternetAddress>> Function(String host)? lookup,
     CdnEndpointProbe? probe,
   })  : _lookup = lookup ?? _lookupHost,
@@ -124,13 +124,23 @@ class CdnEndpointScanner {
     final snis = preferred == null
         ? akamaiSniCandidates
         : <String>[preferred];
+    final resolved = <String, List<InternetAddress>>{};
+    for (var offset = 0; offset < snis.length; offset += maxConcurrency) {
+      if (isCancelled?.call() == true) throw const CdnScanCancelled();
+      final end = (offset + maxConcurrency).clamp(0, snis.length).toInt();
+      final batch = snis.sublist(offset, end);
+      final addresses = await Future.wait(batch.map(_safeLookup));
+      for (var i = 0; i < batch.length; i++) {
+        resolved[batch[i]] = addresses[i];
+      }
+    }
+
     final tasks = <_ProbeTask>[];
     final seenPairs = <String>{};
     final seenIps = <String>{};
     for (final sni in snis) {
       if (isCancelled?.call() == true) throw const CdnScanCancelled();
-      final addresses = await _safeLookup(sni);
-      for (final address in addresses) {
+      for (final address in resolved[sni] ?? const <InternetAddress>[]) {
         if (tasks.length >= maxIpCandidates) break;
         final ip = address.address;
         if (!seenIps.contains(ip) && seenIps.length >= maxIpCandidates) continue;
@@ -166,12 +176,27 @@ class CdnEndpointScanner {
       if (!ips.contains(candidate) && ips.length < 8) ips.add(candidate);
     }
 
+    final resolved = <String, List<InternetAddress>>{};
+    if (ips.isEmpty) {
+      for (var offset = 0; offset < domains.length; offset += maxConcurrency) {
+        if (isCancelled?.call() == true) throw const CdnScanCancelled();
+        final end = (offset + maxConcurrency).clamp(0, domains.length).toInt();
+        final batch = domains.sublist(offset, end);
+        final answers = await Future.wait(batch.map(_safeLookup));
+        for (var i = 0; i < batch.length; i++) {
+          resolved[batch[i]] = answers[i];
+        }
+      }
+    }
+
     final tasks = <_ProbeTask>[];
     final seenPairs = <String>{};
     for (final sni in domains) {
       if (isCancelled?.call() == true) throw const CdnScanCancelled();
       final addresses = ips.isEmpty
-          ? (await _safeLookup(sni)).map((address) => address.address).toList()
+          ? (resolved[sni] ?? const <InternetAddress>[])
+              .map((address) => address.address)
+              .toList(growable: false)
           : ips;
       for (final ip in addresses) {
         final pair = '$ip|$sni';
