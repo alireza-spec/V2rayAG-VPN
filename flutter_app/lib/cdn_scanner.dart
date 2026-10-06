@@ -105,8 +105,57 @@ class CdnEndpointScanner {
     'content.akamai.com',
     'client.akamai.com',
   ];
+  // Reachability-only domain preset transcribed from the user's screenshots.
+  // These are not Meek servers or proof that a domain can carry this VPN route.
+  static const screenshotDomainCandidates = <String>[
+    'a.fsdn.com', 'adobe.com', 'amazon.com', 'amd.com', 'apple.com',
+    'argo-cd.readthedocs.io', 'artstation.com', 'asana.com', 'atlassian.com',
+    'aws.amazon.com', 'azure.microsoft.com', 'bbc.com', 'behance.net',
+    'bing.com', 'bitbucket.org', 'blogger.com', 'blog.helm.sh',
+    'bluesky.social', 'calico.org', 'canva.com', 'chat.deepseek.com',
+    'chatgpt.com', 'cdnjs.com', 'cilium.io', 'cloud.google.com',
+    'cloudflare.com', 'cluster-api.sigs.k8s.io', 'cnn.com', 'code.visualstudio.com',
+    'codepen.io', 'coingecko.cfd', 'container.sigs.k8s.io',
+    'controller-runtime.sigs.k8s.io', 'coursera.org', 'creativecommons.org',
+    'crossplane.io', 'dash.cloudflare.com', 'descheduler.sigs.k8s.io',
+    'deviantart.com', 'digitalocean.com', 'discord.com', 'docs.helm.sh',
+    'dribbble.com', 'dropbox.com', 'duolingo.com', 'e7.c.lencr.org',
+    'ebay.com', 'edx.org', 'external-dns.sigs.k8s.io', 'facebook.com',
+    'fastly.com', 'figma.com', 'fiverr.com', 'freelancer.com', 'fluxcd.io',
+    'gateway-api.sigs.k8s.io', 'github.com', 'gitlab.com', 'glassdoor.com',
+    'gmail.com', 'google.com', 'harbor.io', 'helm.sh',
+    'hierarchical-namespaces.sigs.k8s.io', 'heroku.com',
+    'image-builder.sigs.k8s.io', 'imgur.com', 'instagram.com', 'intel.com',
+    'istio.io', 'jira.com', 'jobset.sigs.k8s.io', 'jsdelivr.com',
+    'kaniko.sigs.k8s.io', 'keda.sh', 'khanacademy.org', 'kind.sigs.k8s.io',
+    'kops.sigs.k8s.io', 'krew.sigs.k8s.io', 'kubectl.docs.kubernetes.io',
+    'kubebuilder.io', 'kubernetes.io', 'kueue.sigs.k8s.io',
+    'kustomize.sigs.k8s.io', 'kwok.sigs.k8s.io', 'letsencrypt.org',
+    'line.me', 'linkedin.com', 'linkerd.io', 'live.com', 'longhorn.io',
+    'mastodon.social', 'medium.com', 'metrics-server.sigs.k8s.io',
+    'microsoft.com', 'minikube.sigs.k8s.io', 'monster.com', 'netflix.com',
+    'netlify.com', 'node-feature-discovery.sigs.k8s.io', 'nodejs.org',
+    'notion.so', 'npmjs.com', 'nuxt.com', 'nuxr.com', 'nytimes.com',
+    'office.com', 'openebs.io', 'operatorframework.io', 'paypal.com',
+    'phpbb.com', 'pinterest.com', 'play.google.com', 'playstation.com',
+    'pnpm.io', 'quora.com', 'reddit.com', 'rook.io', 'salesforce.com',
+    'scheduler-plugins.sigs.k8s.io', 'sciencedirect.com',
+    'secrets-store-csi-driver.sigs.k8s.io', 'service-apis.sigs.k8s.io',
+    'shopify.com', 'signal.org', 'sketch.com', 'skype.com', 'slack.com',
+    'smashingmagazine.com', 'snapchat.com', 'sourceforge.net', 'spotify.com',
+    'stackoverflow.com', 'static.cloudflareinsights.com',
+    'store.steampowered.com', 'tekton.dev', 'telegram.org', 'threads.net',
+    'tiktok.com', 'translate.google.com', 'trello.com', 'tumblr.com',
+    'twitch.tv', 'twitter.com', 'udemy.com', 'upwork.com', 'vercel.com',
+    'viber.com', 'vitejs.dev', 'vuejs.org', 'weather.com', 'wechat.com',
+    'whatsapp.com', 'wikipedia.org', 'wordpress.com', 'www.hcaptcha.com',
+    'www.speedtest.net', 'x.com', 'xbox.com', 'yahoo.com', 'youtube.com',
+    'zoom.us',
+  ];
+
   static const maxIpCandidates = 96;
-  static const maxSniCandidates = 16;
+  static const maxSniCandidates = 180;
+  static const maxSniProbePairs = 180;
 
   final Duration timeout;
   final int maxConcurrency;
@@ -165,7 +214,10 @@ class CdnEndpointScanner {
         ? null
         : CdnFrontingSettings.normalizeSniHostname(currentSni);
     if (entered != null) domains.add(entered);
-    for (final candidate in akamaiSniCandidates) {
+    for (final candidate in <String>[
+      ...screenshotDomainCandidates,
+      ...akamaiSniCandidates,
+    ]) {
       if (!domains.contains(candidate) && domains.length < maxSniCandidates) {
         domains.add(candidate);
       }
@@ -195,15 +247,16 @@ class CdnEndpointScanner {
       if (isCancelled?.call() == true) throw const CdnScanCancelled();
       final addresses = ips.isEmpty
           ? (resolved[sni] ?? const <InternetAddress>[])
+              .take(1)
               .map((address) => address.address)
               .toList(growable: false)
           : ips;
       for (final ip in addresses) {
         final pair = '$ip|$sni';
         if (seenPairs.add(pair)) tasks.add(_ProbeTask(ip, sni));
-        if (tasks.length >= maxIpCandidates) break;
+        if (tasks.length >= maxSniProbePairs) break;
       }
-      if (tasks.length >= maxIpCandidates) break;
+      if (tasks.length >= maxSniProbePairs) break;
     }
     return _run(tasks, resultKey: (task) => task.sni,
         isCancelled: isCancelled, onProgress: onProgress);
