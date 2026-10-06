@@ -14,6 +14,12 @@ void main() {
     const localizations = V2rayLocalizations(Locale('fa'));
     expect(localizations.text('Settings'), 'تنظیمات');
     expect(localizations.text('Connection protocol'), 'پروتکل اتصال');
+    expect(
+      localizations.text('Stop the current connection attempt before changing protocol.'),
+      'برای تغییر پروتکل، ابتدا تلاش اتصال فعلی را متوقف کنید.',
+    );
+    expect(localizations.text('Empty CDN fields keep CDN selected, but this build has no independent Meek engine.'),
+        'کادرهای خالی حالت CDN را حفظ می‌کنند، اما این نسخه موتور مستقل Meek ندارد.');
     expect(localizations.text('CDN Fronting'), 'عبور از CDN');
     expect(localizations.text('CDN IPs'), 'IPهای CDN');
     expect(localizations.text('CDN SNI hostname'), 'نام میزبان SNI در CDN');

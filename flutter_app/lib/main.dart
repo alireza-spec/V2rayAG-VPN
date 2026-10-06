@@ -2290,7 +2290,7 @@ class _HomePage extends StatelessWidget {
                   style: const TextStyle(fontSize: 12, color: _muted)),
               if (personalMode && profile != null) ...[
                 const SizedBox(height: 8),
-                _MetricRow(label: 'SERVER PROFILE', value: profile.name),
+                _MetricRow(label: 'SERVER PROFILE', value: profile?.name ?? context.tr('Unknown')),
               ],
               if (cdnFrontingSelected) ...[
                 const SizedBox(height: 8),
