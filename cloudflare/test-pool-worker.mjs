@@ -45,7 +45,7 @@ class MockStatement {
     if (s.startsWith('DELETE FROM pool_subscriptions WHERE sub_id = ?')) { const n=d.subscriptions.delete(v[0]); return {meta:{changes:Number(n)}}; }
     if (s==='DELETE FROM pool_subscriptions') { const n=d.subscriptions.size; d.subscriptions.clear(); return {meta:{changes:n}}; }
     if (s.startsWith('INSERT INTO app_devices')) { if(d.devices.has(v[0])) throw new Error('unique device'); d.devices.set(v[0],{record_json:v[1],created_at:v[2],active:1}); return {meta:{changes:1}}; }
-    if (s.startsWith('UPDATE app_devices')) { const row=d.devices.get(v[1]); if(!row)return {meta:{changes:0}}; d.devices.set(v[1],{...row,record_json:v[0],active:v[2]}); return {meta:{changes:1}}; }
+    if (s.startsWith('UPDATE app_devices')) { const row=d.devices.get(v[1]); if(!row)return {meta:{changes:0}}; d.devices.set(v[1],{...row,record_json:v[0],active:v.length>2?v[2]:row.active}); return {meta:{changes:1}}; }
     if (s.startsWith('INSERT OR IGNORE INTO pool_profiles')) { if(d.profiles.has(v[0]))return {meta:{changes:0}}; d.profiles.set(v[0],{profile_id:v[0],sub_id:v[1],uri:v[2]}); return {meta:{changes:1}}; }
     if (s.startsWith('INSERT INTO pool_subscription_state')) { d.states.set(v[0],{state_json:v[1],checked_at:v[2]}); return {meta:{changes:1}}; }
     if (s.startsWith('INSERT INTO pool_refresh_locks')) { const prev=d.locks.get(v[0]); if(prev && prev>v[2])return {meta:{changes:0}}; d.locks.set(v[0],v[1]); return {meta:{changes:1}}; }
@@ -113,6 +113,14 @@ try {
   assert.equal('url' in d.candidate,false); assert.equal('candidates' in d,false);
   assert.equal(env.APP_DB.leases.get(d.leaseId).sub_id,poolSub.id);
   assert.equal([...env.APP_DB.profiles.values()].some(p=>p.sub_id===poolSub.id),true);
+  // The first successful lease must stamp lastUsedAt on the device record so
+  // the admin panel shows a real "Last used" time instead of "Never".
+  const deviceHash=Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(appToken)))).map(b=>b.toString(16).padStart(2,'0')).join('');
+  const leasedDevice=env.APP_DB.devices.get(deviceHash);
+  assert.ok(leasedDevice,'enrolled device must exist in D1');
+  const leasedRecord=JSON.parse(leasedDevice.record_json);
+  assert.ok(leasedRecord.lastUsedAt>0,'lastUsedAt must be stamped after a successful lease');
+  const firstUsedAt=leasedRecord.lastUsedAt;
   const firstFetchCount=upstreamCalls;
   const leaseId=d.leaseId;
   r = await call('/v1/pool/leases/release','POST',{leaseId},{'content-type':'application/json', authorization:'Bearer '+appToken}); assert.equal(r.status,200); assert.equal((await r.json()).released,true);
@@ -128,9 +136,14 @@ try {
   }
   assert.equal(upstreamCalls,firstFetchCount,'connections within the five-minute cache window must not rewrite pool state');
   assert.equal(env.POOL.puts,beforeHotPathKvWrites,'app enrollment/lease flow must not write KV');
+  // Throttle: 25 leases within five minutes must not rewrite lastUsedAt each
+  // time. The timestamp advances at most once per throttle window.
+  const throttledRecord=JSON.parse(env.APP_DB.devices.get(deviceHash).record_json);
+  assert.equal(throttledRecord.lastUsedAt,firstUsedAt,'lastUsedAt must be throttled within the five-minute window');
 
   const devices=await (await call('/admin/api/devices','GET',null,{authorization:'Bearer test-admin-key'})).json();
   assert.ok(devices.devices.some(item=>item.active&&item.name==='V2rayAG app (automatic)'));
+  assert.ok(devices.devices.some(item=>item.lastUsedAt>0),'admin device list must show a real Last used timestamp');
   const tokenHash=Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(appToken)))).map(b=>b.toString(16).padStart(2,'0')).join('');
   r=await call('/admin/api/devices/revoke','POST',{id:tokenHash},{authorization:'Bearer test-admin-key','content-type':'application/json'}); assert.equal(r.status,200);
   r=await call('/v1/pool/leases','POST',{exclude:[]},{'content-type':'application/json',authorization:'Bearer '+appToken}); assert.equal(r.status,401);

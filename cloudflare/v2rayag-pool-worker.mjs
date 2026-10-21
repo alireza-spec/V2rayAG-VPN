@@ -397,11 +397,27 @@ async function adminApi(request, env, path) {
   }
   return json({ success:false, error:"Not found" }, 404);
 }
+const LAST_USED_THROTTLE_MS = 5 * 60 * 1000;
+async function touchDeviceLastUsed(env, device) {
+  if (!env.APP_DB) return;
+  if (device.storage !== "d1") return;
+  const now = Date.now();
+  const lastUsedAt = Number(device.record.lastUsedAt || 0);
+  if (lastUsedAt && now - lastUsedAt < LAST_USED_THROTTLE_MS) return;
+  const updated = { ...device.record, lastUsedAt: now };
+  try {
+    await env.APP_DB.prepare("UPDATE app_devices SET record_json = ? WHERE device_hash = ?")
+      .bind(JSON.stringify(updated), device.hash).run();
+    device.record = updated;
+  } catch {
+    // A failed last-used write must never block a lease; the timestamp is
+    // advisory and self-corrects on the next successful update.
+  }
+}
 async function acquirePoolLease(request, env) {
   if (!env.APP_DB) return json({ success:false, error:"Connection storage is temporarily unavailable. Please retry." }, 503);
   const device = await authenticateDevice(request, env);
   if (!device) return json({ success:false, error:"This app installation is not authorized. Contact support if the problem persists." }, 401);
-  // Do not write last-used timestamps on every connection; this avoids hot-path KV writes.
   const body = await parseBody(request);
   const excluded = new Set(Array.isArray(body.exclude)
     ? body.exclude.filter(id => typeof id === "string" && /^[0-9a-f]{24}$/.test(id))
@@ -423,6 +439,7 @@ async function acquirePoolLease(request, env) {
     await env.APP_DB.prepare("DELETE FROM app_leases WHERE expires_at <= ?").bind(now).run();
     await env.APP_DB.prepare("INSERT INTO app_leases (lease_id, sub_id, profile_id, device_hash, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?)")
       .bind(leaseId, sub.id, id, device.hash, now, now + LEASE_TTL_SECONDS * 1000).run();
+    await touchDeviceLastUsed(env, device);
     return json({
       success:true,
       leaseId,
