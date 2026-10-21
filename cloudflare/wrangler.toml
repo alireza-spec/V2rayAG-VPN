@@ -1,0 +1,12 @@
+name = "v2rayag-app-pool-control"
+main = "v2rayag-pool-worker.mjs"
+compatibility_date = "2025-09-01"
+
+[[d1_databases]]
+binding = "APP_DB"
+database_name = "v2rayag-app-db"
+database_id = "YOUR_D1_DATABASE_ID"
+
+[[kv_namespaces]]
+binding = "POOL"
+id = "YOUR_KV_NAMESPACE_ID"
